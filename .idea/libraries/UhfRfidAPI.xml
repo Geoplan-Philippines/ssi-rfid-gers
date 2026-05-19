@@ -1,7 +1,7 @@
 <component name="libraryTable">
   <library name="UhfRfidAPI">
     <CLASSES>
-      <root url="jar://$USER_HOME$/Documents/Fixed RFID SDK/JAVA/JAVA API/libs/UhfRfidAPI.jar!/" />
+      <root url="jar://$USER_HOME$/Downloads/SDK/JAVA/JAVA/JAVA API/libs/UhfRfidAPI.jar!/" />
     </CLASSES>
     <JAVADOC />
     <SOURCES />
