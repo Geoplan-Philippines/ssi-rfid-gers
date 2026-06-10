@@ -9,861 +9,449 @@ import JavaAPI.Entities.ReadTagParameter;
 import JavaAPI.Entities.GpioLevelParameter;
 import JavaAPI.Entities.GpioLevel;
 
+import JavaAPI.Core.ErrInfo;
+
 import JavaAPI.TcpClientPort;
 import Utils.Event;
-
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 
+import java.time.Duration;
 import java.time.Instant;
 
+import java.util.Collections;
 import java.util.HashMap;
-import java.util.Locale;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class Main {
 
     private Reader reader;
-
     private boolean connected = false;
-
-    /*
-     * RFID inventory state
-     */
     private volatile boolean inventoryRunning = false;
 
     /*
-     * Used for noisy trigger protection
+     * Known RFID tags are fetched from NestJS and refreshed while the app runs.
+     * Alarm will only trigger for EPCs in this set.
      */
-    private long lastMotionAt = 0;
+    private volatile Set<String> knownEpcs = Collections.emptySet();
 
     /*
-        * Last sensor state change time
+     * Prevent repeated alarm spam per EPC.
      */
-    private volatile long lastSensorTriggerTime = 0;
+    private final Map<String, Long> lastAlarmAt = new HashMap<>();
 
-    /*
-        * Latest sensor level when available
-        */
-    private volatile Boolean gpiActive = null;
+    private final HttpClient httpClient = HttpClient.newHttpClient();
+    private final ScheduledExecutorService knownEpcRefreshExecutor = Executors.newSingleThreadScheduledExecutor((task) -> {
+        Thread thread = new Thread(task, "known-epc-refresh");
+        thread.setDaemon(true);
+        return thread;
+    });
 
-        private volatile boolean loggedUnknownGpi = false;
-
-    /*
-     * Prevent excessive logs / rapid retriggers
-     */
-    private static final long MOTION_COOLDOWN_MS = 700;
-
-    /*
-     * RFID stays active this long AFTER
-     * the LAST sensor trigger
-     */
-    private static final long INVENTORY_DURATION_MS = 5000;
-
-    /*
-     * Known RFID tags
-     */
-    private final Set<String> knownEpcs = Set.of(
-            "A0000010",
-            "E2806995000040039398BA49"
+    private static final Pattern KNOWN_EPCS_ARRAY_PATTERN = Pattern.compile(
+            "\"knownEpcs\"\\s*:\\s*\\[(.*?)\\]",
+            Pattern.DOTALL
     );
+    private static final Pattern JSON_STRING_PATTERN = Pattern.compile("\"((?:\\\\.|[^\"\\\\])*)\"");
 
     /*
-     * EPC cooldown tracking
+     * Reader connection.
      */
-    private final Map<String, Long> lastAlarmAt =
-            new HashMap<>();
-
-    /*
-     * Reader connection
-     */
-    private static final String READER_IP =
-            "192.168.1.100";
-
+    private static final String READER_IP = "192.168.1.100";
     private static final int READER_PORT = 9090;
 
     /*
-     * NestJS API
+     * Optional NestJS API.
+     * Set ENABLE_NEST_NOTIFY to false if you only want physical alarm.
      */
-    private static final String NEST_ALARM_URL =
-            "http://localhost:3000/rfid/alarm";
+    private static final boolean ENABLE_NEST_NOTIFY = true;
+    private static final String ANTI_THEFT_API_BASE_URL = configValue(
+            "ANTI_THEFT_API_BASE_URL",
+            "http://localhost:8000/api/v1/anti-theft"
+    );
+    private static final String ALARMS_API_BASE_URL = configValue(
+            "ALARMS_API_BASE_URL",
+            "http://localhost:8000/api/v1/alarms"
+    );
+    private static final String NEST_ALARM_URL = ALARMS_API_BASE_URL;
+    private static final String NEST_KNOWN_EPCS_URL = ANTI_THEFT_API_BASE_URL + "/known-epcs";
+    private static final long KNOWN_EPCS_REFRESH_MS = configLongValue("KNOWN_EPCS_REFRESH_MS", 5_000);
 
     /*
-     * Prevent repeated alarms
-     */
-    private static final long ALARM_COOLDOWN_MS =
-            2500;
-
-    /*
-     * GPIO output port
+     * Alarm output.
+     *
+     * OUT1 is physically Pin 6 on the R400 GPIO terminal.
+     * If OUT1 does not work, test 2 or 3.
      */
     private static final byte ALARM_OUTPUT_PORT = 1;
 
     /*
-     * Alarm pulse duration
+     * Alarm duration.
      */
-    private static final long ALARM_ON_MS = 300;
+    private static final long ALARM_ON_MS = 500;
+
+    /*
+     * Alarm cooldown.
+     */
+    private static final long ALARM_COOLDOWN_MS = 2_500;
+
+    /*
+     * If alarm behavior is inverted, swap these:
+     *
+     * ON  = GpioLevel.Low
+     * OFF = GpioLevel.High
+     */
+    private static final GpioLevel ALARM_ON_LEVEL = GpioLevel.High;
+    private static final GpioLevel ALARM_OFF_LEVEL = GpioLevel.Low;
+//    private static final GpioLevel ALARM_ON_LEVEL = GpioLevel.Low;
+//    private static final GpioLevel ALARM_OFF_LEVEL = GpioLevel.High;
 
     public static void main(String[] args) {
-
         new Main().run();
     }
 
     public void run() {
-
         try {
+            System.out.println("Starting RFID alarm demo...");
 
-            System.out.println(
-                    "Starting RFID SDK test..."
-            );
-
-            reader = new Reader(
-                    "Device1",
-                    new TcpClientPort(
-                            READER_IP,
-                            READER_PORT
-                    )
-            );
-
-            ConnectResponse response =
-                    reader.Connect();
-
-            if (!response.IsSucessed) {
-
-                System.out.println(
-                        "❌ Connection failed"
-                );
-
-                System.out.println(
-                        response.ErrorInfo
-                );
-
-                return;
-            }
-
-            connected = true;
-
-            System.out.println(
-                    "✅ Connected!"
-            );
+            connectReader();
 
             /*
-             * RFID TAG EVENT
-             */
-            Event tagEvent =
-                    new Event(
-                            this,
-                            "Reader_OnInventoryReceived"
-                    );
+             * Very important:
+             * Always force alarm OFF on startup.
+            */
+            forceAlarmOff();
 
-            reader.OnInventoryReceived
-                    .addEvent(tagEvent);
+            refreshKnownEpcs();
+            startKnownEpcRefresh();
 
-            /*
-             * GPI SENSOR EVENT
-             */
-            Event gpiEvent =
-                    new Event(
-                            this,
-                            "Reader_OnGpiTriggerReceived"
-                    );
+            registerTagEvent();
 
-            reader.OnGpiTriggerReceived
-                    .addEvent(gpiEvent);
+            startInventory();
 
-            System.out.println(
-                    "🟢 System armed."
-            );
-
-            System.out.println(
-                    "Waiting for sensor trigger..."
-            );
+            System.out.println("🟢 System armed.");
+            System.out.println("📡 Scanning continuously...");
+            System.out.println("Known EPCs: " + knownEpcs);
 
             /*
-             * Keep app alive
+             * Keep app alive.
              */
             while (true) {
-
                 Thread.sleep(1000);
             }
 
         } catch (Exception e) {
-
             e.printStackTrace();
 
         } finally {
-
             stopReader();
         }
     }
 
-    /*
-     * SENSOR CALLBACK
-     */
-    public synchronized void Reader_OnGpiTriggerReceived(
-            Object sender,
-            Object gpiInfo
-    ) {
+    private void connectReader() throws Exception {
+        reader = new Reader(
+                "Device1",
+                new TcpClientPort(READER_IP, READER_PORT)
+        );
 
-        try {
+        ConnectResponse response = reader.Connect();
 
-            long now =
-                    System.currentTimeMillis();
-
-            Boolean active =
-                    extractGpiActive(gpiInfo);
-
-            if (active == null) {
-
-                if (!loggedUnknownGpi) {
-
-                    loggedUnknownGpi = true;
-
-                    System.out.println(
-                            "⚠️ Unknown GPI level, using edge toggle. Payload: "
-                                    + gpiInfo.getClass().getName()
-                                    + " => "
-                                    + gpiInfo
-                    );
-                }
-
-                active =
-                        (gpiActive == null)
-                                ? true
-                                : !gpiActive;
-            }
-
-            /*
-             * Always refresh state change time
-             */
-            lastSensorTriggerTime = now;
-
-            gpiActive = active;
-
-            if (active != null
-                    && !active) {
-
-                return;
-            }
-
-            /*
-             * Prevent noisy logs
-             */
-            if (now - lastMotionAt
-                    < MOTION_COOLDOWN_MS) {
-
-                return;
-            }
-
-            lastMotionAt = now;
-
-            System.out.println(
-                    "📥 SENSOR ACTIVE"
-            );
-
-            /*
-             * If already scanning,
-             * just extend runtime
-             */
-            if (inventoryRunning) {
-
-                System.out.println(
-                        "🔄 Inventory extended"
-                );
-
-                return;
-            }
-
-            /*
-             * Start RFID inventory
-             */
-            startInventory();
-
-        } catch (Exception e) {
-
-            e.printStackTrace();
+        if (!response.IsSucessed) {
+            System.out.println("❌ Connection failed");
+            System.out.println(response.ErrorInfo);
+            throw new RuntimeException("Reader connection failed");
         }
+
+        connected = true;
+        System.out.println("✅ Connected to reader");
     }
 
-    /*
-     * START RFID INVENTORY
-     */
+    private void registerTagEvent() {
+        Event tagEvent = new Event(
+                this,
+                "Reader_OnInventoryReceived"
+        );
+
+        reader.OnInventoryReceived.addEvent(tagEvent);
+
+        System.out.println("✅ RFID tag event registered");
+    }
+
     private synchronized void startInventory() {
-
         try {
+            if (inventoryRunning) {
+                return;
+            }
 
-            inventoryRunning = true;
-
-            System.out.println(
-                    "🚀 Starting RFID inventory..."
-            );
-
-            ReadTagParameter readTagParameter =
-                    new ReadTagParameter();
+            ReadTagParameter readTagParameter = new ReadTagParameter();
 
             readTagParameter.IsLoop = true;
-
             readTagParameter.ReadCount = 0;
 
             /*
-             * IMPORTANT:
-             * Infinite inventory until manually stopped
+             * 0 means no total time limit.
+             * It will scan until MsgPowerOff is sent.
              */
             readTagParameter.TotalReadTime = 0;
 
             readTagParameter.IsReturnEPC = true;
-
             readTagParameter.IsReturnTID = false;
 
-            MsgTagInventory inventory =
-                    new MsgTagInventory(
-                            readTagParameter
-                    );
+            MsgTagInventory inventory = new MsgTagInventory(readTagParameter);
 
-            boolean started =
-                    reader.Send(inventory);
+            boolean started = reader.Send(inventory);
 
             if (!started) {
-
                 inventoryRunning = false;
 
-                System.out.println(
-                        "❌ Failed to start inventory"
-                );
-
-                System.out.println(
-                        inventory.getErrorInfo()
-                );
-
+                System.out.println("❌ Failed to start inventory");
+                System.out.println(inventory.getErrorInfo());
                 return;
             }
 
-            System.out.println(
-                    "📡 RFID ACTIVE"
-            );
-
-            /*
-             * WATCHDOG THREAD
-             *
-             * Keeps RFID alive while
-             * sensor keeps triggering.
-             *
-             * Stops RFID after
-             * no motion for 5 seconds.
-             */
-            new Thread(() -> {
-
-                try {
-
-                    while (inventoryRunning) {
-
-                                                Boolean active = gpiActive;
-
-                                                if (active != null
-                                                                && active) {
-
-                                                        Thread.sleep(200);
-
-                                                        continue;
-                                                }
-
-                        long idleTime =
-                                System.currentTimeMillis()
-                                        - lastSensorTriggerTime;
-
-                        /*
-                         * No motion timeout
-                         */
-                        if (idleTime
-                                >= INVENTORY_DURATION_MS) {
-
-                            System.out.println(
-                                    "⌛ No motion for "
-                                            + INVENTORY_DURATION_MS
-                                            + "ms"
-                            );
-
-                            stopInventory();
-
-                            break;
-                        }
-
-                        Thread.sleep(200);
-                    }
-
-                } catch (Exception e) {
-
-                    e.printStackTrace();
-                }
-
-            }).start();
+            inventoryRunning = true;
+            System.out.println("🚀 RFID inventory started");
 
         } catch (Exception e) {
-
             inventoryRunning = false;
-
-            e.printStackTrace();
-        }
-    }
-
-        /*
-         * Best-effort level extraction for SDK event payloads.
-         */
-        private Boolean extractGpiActive(Object gpiInfo) {
-
-                if (gpiInfo == null) {
-
-                        return null;
-                }
-
-                Boolean isHigh =
-                                callBooleanMethod(gpiInfo, "isHigh");
-
-                if (isHigh != null) {
-
-                        return isHigh;
-                }
-
-                Boolean isLow =
-                                callBooleanMethod(gpiInfo, "isLow");
-
-                if (isLow != null) {
-
-                        return !isLow;
-                }
-
-                Boolean isTriggered =
-                                callBooleanMethod(gpiInfo, "isTriggered");
-
-                if (isTriggered != null) {
-
-                        return isTriggered;
-                }
-
-                if (gpiInfo instanceof GpioLevel) {
-
-                        return gpiInfo == GpioLevel.High;
-                }
-
-                Object level =
-                                readGpiLevelMember(gpiInfo);
-
-                if (level instanceof GpioLevel) {
-
-                        return level == GpioLevel.High;
-                }
-
-                if (level instanceof Enum<?>) {
-
-                        return parseActiveFromString(
-                                        ((Enum<?>) level).name()
-                        );
-                }
-
-                if (level instanceof Boolean) {
-
-                        return (Boolean) level;
-                }
-
-                if (level instanceof Number) {
-
-                        return ((Number) level).intValue() != 0;
-                }
-
-                if (level != null) {
-
-                        return parseActiveFromString(
-                                        level.toString()
-                        );
-                }
-
-                return parseActiveFromString(
-                                gpiInfo.toString()
-                );
-        }
-
-        private Boolean parseActiveFromString(String value) {
-
-                if (value == null) {
-
-                        return null;
-                }
-
-                String normalized =
-                                value.trim()
-                                                .toUpperCase(Locale.ROOT);
-
-                if (normalized.contains("HIGH")
-                                || normalized.contains("ON")
-                                || normalized.contains("TRUE")
-                                || normalized.contains("ACTIVE")
-                                || normalized.contains("TRIGGER")
-                                || normalized.equals("1")) {
-
-                        return true;
-                }
-
-                if (normalized.contains("LOW")
-                                || normalized.contains("OFF")
-                                || normalized.contains("FALSE")
-                                || normalized.contains("INACTIVE")
-                                || normalized.contains("IDLE")
-                                || normalized.equals("0")) {
-
-                        return false;
-                }
-
-                return null;
-        }
-
-        private Boolean callBooleanMethod(Object target, String name) {
-
-                try {
-
-                        Method method =
-                                        target.getClass()
-                                                        .getMethod(name);
-
-                        Object value =
-                                        method.invoke(target);
-
-                        if (value instanceof Boolean) {
-
-                                return (Boolean) value;
-                        }
-
-                } catch (Exception ignored) {
-                }
-
-                return null;
-        }
-
-        private Object readGpiLevelMember(Object gpiInfo) {
-
-                String[] fieldNames = {
-                                "Level",
-                                "level",
-                                "GpioLevel",
-                                "gpiLevel",
-                                "State",
-                                "state",
-                                "Status",
-                                "status",
-                                "Value",
-                                "value",
-                                "InputLevel",
-                                "inputLevel"
-                };
-
-                for (String fieldName : fieldNames) {
-
-                        try {
-
-                                Field field =
-                                                gpiInfo.getClass()
-                                                                .getField(fieldName);
-
-                                return field.get(gpiInfo);
-
-                        } catch (Exception ignored) {
-                        }
-
-                        try {
-
-                                Field field =
-                                                gpiInfo.getClass()
-                                                                .getDeclaredField(fieldName);
-
-                                field.setAccessible(true);
-
-                                return field.get(gpiInfo);
-
-                        } catch (Exception ignored) {
-                        }
-                }
-
-                String[] getters = {
-                                "getLevel",
-                                "getGpiLevel",
-                                "getInputLevel",
-                                "getState",
-                                "getStatus",
-                                "getValue"
-                };
-
-                for (String getter : getters) {
-
-                        try {
-
-                                Method method =
-                                                gpiInfo.getClass()
-                                                                .getMethod(getter);
-
-                                return method.invoke(gpiInfo);
-
-                        } catch (Exception ignored) {
-                        }
-                }
-
-                return null;
-        }
-
-    /*
-     * STOP RFID INVENTORY
-     */
-    private synchronized void stopInventory() {
-
-        try {
-
-            MsgPowerOff stop =
-                    new MsgPowerOff();
-
-            reader.Send(stop);
-
-            inventoryRunning = false;
-
-            System.out.println(
-                    "🛑 RFID inventory stopped"
-            );
-
-        } catch (Exception e) {
-
             e.printStackTrace();
         }
     }
 
     /*
-     * RFID TAG EVENT
+     * SDK callback method name must match the Utils.Event registration.
      */
-    public void Reader_OnInventoryReceived(
-            Reader sender,
-            RxdTagData tagData
-    ) {
-
+    public void Reader_OnInventoryReceived(Reader sender, RxdTagData tagData) {
         try {
-
             if (tagData == null) {
-
-                System.out.println(
-                        "tagData is null"
-                );
-
                 return;
             }
 
-            byte[] epcBytes =
-                    tagData.getEPC();
+            byte[] epcBytes = tagData.getEPC();
 
-            if (epcBytes == null
-                    || epcBytes.length == 0) {
-
-                System.out.println(
-                        "EPC empty"
-                );
-
+            if (epcBytes == null || epcBytes.length == 0) {
                 return;
             }
 
-            String epc =
-                    normalizeEpc(
-                            bytesToHex(epcBytes)
-                    );
+            String epc = normalizeEpc(bytesToHex(epcBytes));
 
-            System.out.println(
-                    "📦 EPC: " + epc
-            );
+            System.out.println("📦 EPC scanned: " + epc);
 
             /*
-             * Ignore unknown EPCs
+             * Unknown EPC = no alarm.
              */
             if (!knownEpcs.contains(epc)) {
-
-                System.out.println(
-                        "Ignored unknown EPC"
-                );
-
+                System.out.println("Ignored unknown EPC");
                 return;
             }
 
             /*
-             * Prevent spam alarms
+             * Known EPC but still cooling down = no alarm.
              */
             if (!shouldAlarm(epc)) {
-
-                System.out.println(
-                        "⏳ EPC cooldown active"
-                );
-
+                System.out.println("⏳ Known EPC ignored due to cooldown");
                 return;
             }
 
-            System.out.println(
-                    "🚨 KNOWN EPC DETECTED"
-            );
+            System.out.println("🚨 KNOWN EPC DETECTED: " + epc);
 
-            triggerAlarmOutput();
+            triggerAlarmPulse();
 
-            sendAlarmToNest(epc);
+            if (ENABLE_NEST_NOTIFY) {
+                sendAlarmToNest(epc);
+            }
 
         } catch (Exception e) {
-
             e.printStackTrace();
         }
     }
 
-    /*
-     * SHUTDOWN READER
-     */
-    private void stopReader() {
+    private synchronized boolean shouldAlarm(String epc) {
+        long now = System.currentTimeMillis();
 
-        try {
+        Long lastTime = lastAlarmAt.get(epc);
 
-            if (reader == null
-                    || !connected) {
-
-                return;
-            }
-
-            try {
-
-                MsgPowerOff stop =
-                        new MsgPowerOff();
-
-                reader.Send(stop);
-
-            } catch (Exception ignored) {
-            }
-
-            try {
-
-                reader.Disconnect();
-
-            } catch (Exception ignored) {
-            }
-
-            connected = false;
-
-            System.out.println(
-                    "Disconnected."
-            );
-
-        } catch (Exception e) {
-
-            e.printStackTrace();
-        }
-    }
-
-    /*
-     * EPC COOLDOWN
-     */
-    private boolean shouldAlarm(String epc) {
-
-        long now =
-                System.currentTimeMillis();
-
-        Long lastTime =
-                lastAlarmAt.get(epc);
-
-        if (lastTime == null
-                || now - lastTime
-                > ALARM_COOLDOWN_MS) {
-
+        if (lastTime == null || now - lastTime > ALARM_COOLDOWN_MS) {
             lastAlarmAt.put(epc, now);
-
             return true;
         }
 
         return false;
     }
 
-    /*
-     * TRIGGER GPIO OUTPUT
-     */
-    private synchronized void triggerAlarmOutput() {
-
+    private synchronized void triggerAlarmPulse() {
         try {
+            setAlarmOn();
 
-            setGpoLevel(
-                    ALARM_OUTPUT_PORT,
-                    GpioLevel.High
-            );
-
-            System.out.println(
-                    "🚨 GPIO ON"
-            );
+            System.out.println("🚨 Alarm ON");
 
             Thread.sleep(ALARM_ON_MS);
 
         } catch (Exception e) {
-
+            System.out.println("❌ Alarm pulse failed");
             e.printStackTrace();
 
         } finally {
-
-            try {
-
-                setGpoLevel(
-                        ALARM_OUTPUT_PORT,
-                        GpioLevel.Low
-                );
-
-                System.out.println(
-                        "✅ GPIO OFF"
-                );
-
-            } catch (Exception e) {
-
-                e.printStackTrace();
-            }
+            forceAlarmOff();
         }
     }
 
-    /*
-     * SET GPO LEVEL
-     */
-    private void setGpoLevel(
-            byte portNo,
-            GpioLevel level
-    ) {
+    private void setAlarmOn() {
+        setGpoLevel(ALARM_OUTPUT_PORT, ALARM_ON_LEVEL);
+    }
 
-        GpioLevelParameter parameter =
-                new GpioLevelParameter();
+    private void forceAlarmOff() {
+        try {
+            setGpoLevel(ALARM_OUTPUT_PORT, ALARM_OFF_LEVEL);
+            System.out.println("✅ Alarm OFF");
 
+        } catch (Exception e) {
+            System.out.println("⚠️ Failed to force alarm OFF");
+            e.printStackTrace();
+        }
+    }
+
+    private void setGpoLevel(byte portNo, GpioLevel level) {
+        if (reader == null || !connected) {
+            System.out.println("⚠️ Cannot set GPO. Reader not connected.");
+            return;
+        }
+
+        GpioLevelParameter parameter = new GpioLevelParameter();
         parameter.PortNO = portNo;
-
         parameter.Level = level;
 
-        MsgGpoConfig message =
-                new MsgGpoConfig(parameter);
+        MsgGpoConfig message = new MsgGpoConfig(parameter);
 
-        boolean success =
-                reader.Send(message);
+        boolean success = reader.Send(message, 2000);
 
         if (!success) {
-
-            System.out.println(
-                    "❌ Failed GPO"
-            );
-
-            System.out.println(
-                    message.getErrorInfo()
-            );
+            ErrInfo err = message.getErrorInfo();
+            System.out.println("❌ Failed to set OUT" + portNo + " to " + level
+                    + " | status=" + message.getStatus()
+                    + " | code=" + (err != null ? err.getErrCode() : "?")
+                    + " | msg=" + (err != null ? err.getErrMsg() : "?"));
         }
     }
 
-    /*
-     * SEND TO NESTJS
-     */
-    private void sendAlarmToNest(String epc) {
-
+    private synchronized void stopInventory() {
         try {
+            if (!inventoryRunning) {
+                return;
+            }
 
+            MsgPowerOff stop = new MsgPowerOff();
+            reader.Send(stop, 2000);
+
+            inventoryRunning = false;
+
+            System.out.println("🛑 RFID inventory stopped");
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void stopReader() {
+        try {
+            forceAlarmOff();
+            knownEpcRefreshExecutor.shutdownNow();
+
+            if (reader == null || !connected) {
+                return;
+            }
+
+            stopInventory();
+
+            try {
+                reader.Disconnect();
+                System.out.println("Disconnected.");
+            } catch (Exception ignored) {
+            }
+
+            connected = false;
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void startKnownEpcRefresh() {
+        knownEpcRefreshExecutor.scheduleWithFixedDelay(
+                this::refreshKnownEpcs,
+                KNOWN_EPCS_REFRESH_MS,
+                KNOWN_EPCS_REFRESH_MS,
+                TimeUnit.MILLISECONDS
+        );
+    }
+
+    private void refreshKnownEpcs() {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(NEST_KNOWN_EPCS_URL))
+                    .timeout(Duration.ofSeconds(3))
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(
+                    request,
+                    HttpResponse.BodyHandlers.ofString()
+            );
+
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                System.out.println("Failed to fetch known EPCs. HTTP " + response.statusCode());
+                return;
+            }
+
+            Set<String> fetchedKnownEpcs = parseKnownEpcs(response.body());
+            knownEpcs = fetchedKnownEpcs;
+
+            System.out.println("Known EPCs refreshed: " + knownEpcs);
+
+        } catch (Exception e) {
+            System.out.println("Failed to refresh known EPCs. Keeping last known set: " + knownEpcs);
+            e.printStackTrace();
+        }
+    }
+
+    private Set<String> parseKnownEpcs(String responseBody) {
+        Matcher arrayMatcher = KNOWN_EPCS_ARRAY_PATTERN.matcher(responseBody);
+
+        if (!arrayMatcher.find()) {
+            throw new IllegalArgumentException("knownEpcs array missing from NestJS response");
+        }
+
+        Set<String> parsedKnownEpcs = new HashSet<>();
+        Matcher valueMatcher = JSON_STRING_PATTERN.matcher(arrayMatcher.group(1));
+
+        while (valueMatcher.find()) {
+            String epc = normalizeEpc(unescapeJsonString(valueMatcher.group(1)));
+
+            if (!epc.isEmpty()) {
+                parsedKnownEpcs.add(epc);
+            }
+        }
+
+        return Set.copyOf(parsedKnownEpcs);
+    }
+
+    private String unescapeJsonString(String value) {
+        return value
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\");
+    }
+
+    private void sendAlarmToNest(String epc) {
+        try {
             String json = """
                     {
                       "epc": "%s",
@@ -875,70 +463,73 @@ public class Main {
                     Instant.now().toString()
             );
 
-            HttpRequest request =
-                    HttpRequest.newBuilder()
-                            .uri(
-                                    URI.create(
-                                            NEST_ALARM_URL
-                                    )
-                            )
-                            .header(
-                                    "Content-Type",
-                                    "application/json"
-                            )
-                            .POST(
-                                    HttpRequest.BodyPublishers
-                                            .ofString(json)
-                            )
-                            .build();
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(NEST_ALARM_URL))
+                    .timeout(Duration.ofSeconds(3))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(json))
+                    .build();
 
-            HttpClient client =
-                    HttpClient.newHttpClient();
-
-            HttpResponse<String> response =
-                    client.send(
-                            request,
-                            HttpResponse.BodyHandlers
-                                    .ofString()
-                    );
-
-            System.out.println(
-                    "✅ NestJS response: "
-                            + response.body()
+            HttpResponse<String> response = httpClient.send(
+                    request,
+                    HttpResponse.BodyHandlers.ofString()
             );
 
-        } catch (Exception e) {
+            System.out.println("✅ NestJS response: " + response.body());
 
+        } catch (Exception e) {
+            System.out.println("⚠️ Failed to notify NestJS");
             e.printStackTrace();
         }
     }
 
-    /*
-     * NORMALIZE EPC
-     */
     private String normalizeEpc(String epc) {
-
         return epc
-                .replace(" ", "")
+                .replaceAll("\\s+", "")
                 .trim()
                 .toUpperCase();
     }
 
-    /*
-     * BYTE ARRAY TO HEX
-     */
     private String bytesToHex(byte[] bytes) {
-
-        StringBuilder result =
-                new StringBuilder();
+        StringBuilder result = new StringBuilder();
 
         for (byte b : bytes) {
-
-            result.append(
-                    String.format("%02X", b)
-            );
+            result.append(String.format("%02X", b));
         }
 
         return result.toString();
+    }
+
+    private static String configValue(String key, String defaultValue) {
+        String systemValue = System.getProperty(key);
+
+        if (systemValue != null && !systemValue.trim().isEmpty()) {
+            return systemValue.trim();
+        }
+
+        String environmentValue = System.getenv(key);
+
+        if (environmentValue != null && !environmentValue.trim().isEmpty()) {
+            return environmentValue.trim();
+        }
+
+        return defaultValue;
+    }
+
+    private static long configLongValue(String key, long defaultValue) {
+        String value = configValue(key, Long.toString(defaultValue));
+
+        try {
+            long parsedValue = Long.parseLong(value);
+
+            if (parsedValue <= 0) {
+                throw new NumberFormatException("Value must be positive");
+            }
+
+            return parsedValue;
+        } catch (NumberFormatException e) {
+            System.out.println("Invalid " + key + " value '" + value + "'. Using " + defaultValue + ".");
+            return defaultValue;
+        }
     }
 }
