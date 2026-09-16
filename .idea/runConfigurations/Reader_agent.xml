@@ -1,0 +1,13 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Reader agent" type="Application" factoryName="Application">
+    <option name="MAIN_CLASS_NAME" value="com.geoplan.rfid.agent.AgentMain" />
+    <module name="idata-rfid-sdk" />
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+    <!-- Add MIDDLEWARE_BASE_URL, MIDDLEWARE_API_KEY and any overrides here,
+         or run scripts\run.ps1 which reads agent.env instead. -->
+    <envs />
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>

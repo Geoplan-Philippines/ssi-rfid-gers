@@ -28,3 +28,10 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+### RFID reader agent ###
+build/
+certs/
+agent.env
+*.p12
+*.jks
+libs/
