@@ -2,12 +2,21 @@ package com.geoplan.rfid.agent.config;
 
 import com.geoplan.rfid.agent.util.Log;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.Map;
+
 /**
  * Configuration lookup. A -D system property wins over an environment variable,
- * which wins over the built in desk default. Nothing is hardcoded in source
- * except non secret desk defaults.
+ * which wins over agent.env in the working directory, then the desk default.
+ * Nothing is hardcoded in source except non secret desk defaults.
  */
 public final class Env {
+
+    private static final Map<String, String> FILE_VALUES = loadEnvFile();
 
     private Env() {
     }
@@ -25,7 +34,55 @@ public final class Env {
             return environmentValue.trim();
         }
 
+        String fileValue = FILE_VALUES.get(key);
+
+        if (fileValue != null && !fileValue.isEmpty()) {
+            return fileValue;
+        }
+
         return defaultValue;
+    }
+
+    private static Map<String, String> loadEnvFile() {
+        Path file = Path.of("agent.env").toAbsolutePath().normalize();
+        Map<String, String> values = new HashMap<>();
+
+        if (!Files.exists(file)) {
+            return values;
+        }
+
+        try {
+            for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
+                // Some Windows editors save UTF-8 with a byte order mark.
+                String trimmed = line.startsWith("\uFEFF") ? line.substring(1).trim() : line.trim();
+
+                if (trimmed.isEmpty() || trimmed.startsWith("#")) {
+                    continue;
+                }
+
+                int separator = trimmed.indexOf('=');
+
+                if (separator < 1) {
+                    continue;
+                }
+
+                String key = trimmed.substring(0, separator).trim();
+                String value = trimmed.substring(separator + 1).trim();
+
+                if (value.length() >= 2 && ((value.startsWith("\"") && value.endsWith("\""))
+                        || (value.startsWith("'") && value.endsWith("'")))) {
+                    value = value.substring(1, value.length() - 1).trim();
+                }
+
+                values.put(key, value);
+            }
+
+            Log.info("Loaded configuration from " + file);
+        } catch (IOException e) {
+            Log.warn("Could not read configuration from " + file, e);
+        }
+
+        return values;
     }
 
     public static String optional(String key) {

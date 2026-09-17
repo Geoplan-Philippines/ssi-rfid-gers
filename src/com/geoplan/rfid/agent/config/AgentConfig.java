@@ -4,7 +4,7 @@ import com.geoplan.rfid.agent.util.Log;
 
 /**
  * Every knob the agent has. Values come from -D system properties or the
- * environment, defaults target a single reader desk.
+ * environment or agent.env, defaults target a single reader desk.
  */
 public final class AgentConfig {
 

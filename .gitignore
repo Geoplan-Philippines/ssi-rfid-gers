@@ -3,6 +3,7 @@ out/
 !**/src/main/**/out/
 !**/src/test/**/out/
 .kotlin
+*~
 
 ### Eclipse ###
 .apt_generated
@@ -32,6 +33,13 @@ bin/
 build/
 certs/
 agent.env
+agent.env.*
+!agent.env.example
+.env
+.env.*
+!.env.example
 *.p12
 *.jks
 libs/
+*.class
+*.log

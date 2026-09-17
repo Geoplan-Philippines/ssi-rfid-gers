@@ -2,7 +2,7 @@
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\run.ps1
 #
-# Configuration comes from agent.env in the repo root, or from the environment.
+# Java loads agent.env in the repo root; environment variables can override it.
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 
@@ -12,8 +12,6 @@ $classes = Join-Path $root 'build\classes'
 if (-not (Test-Path (Join-Path $classes 'com\geoplan\rfid\agent\AgentMain.class'))) {
     throw "build\classes is missing or stale. Run scripts\build.ps1 first."
 }
-
-Import-AgentEnv
 
 $java = Get-JavaTool -Name 'java'
 $classPath = "$classes;$(Get-SdkClassPath)"

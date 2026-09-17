@@ -57,34 +57,3 @@ function Get-JavaTool {
 
     throw "$Name not found. Install a JDK 17+ and set JAVA_HOME."
 }
-
-# Loads KEY=VALUE lines from <repo>\agent.env into the process environment.
-# Keep secrets there, it is gitignored.
-function Import-AgentEnv {
-    $envFile = Join-Path (Get-RepoRoot) 'agent.env'
-
-    if (-not (Test-Path $envFile)) {
-        return
-    }
-
-    Write-Host "Loading environment from $envFile"
-
-    foreach ($line in Get-Content $envFile) {
-        $trimmed = $line.Trim()
-
-        if ($trimmed -eq '' -or $trimmed.StartsWith('#')) {
-            continue
-        }
-
-        $separator = $trimmed.IndexOf('=')
-
-        if ($separator -lt 1) {
-            continue
-        }
-
-        $key = $trimmed.Substring(0, $separator).Trim()
-        $value = $trimmed.Substring($separator + 1).Trim().Trim('"')
-
-        Set-Item -Path "env:$key" -Value $value
-    }
-}

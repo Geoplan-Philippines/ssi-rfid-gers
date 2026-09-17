@@ -83,6 +83,10 @@ Set `SCAN_START_CONFLICT=reject` if you would rather protect a scan in progress.
 The agent then answers 409 and the middleware rolls the new document back to
 NEW. The desk is blocked until the first session is stopped.
 
+Takeover is the decided default for a one reader desk. Revisit it when several
+readers share one agent, since taking over is only safe while there is one
+antenna and one session to take over.
+
 Stop is deliberately lenient. A stop for an unknown session answers 200 and
 leaves the active session alone, so a cancel can never wedge the document.
 
@@ -114,8 +118,10 @@ folder, or drop them in `libs\` here. The build also falls back to
 ## Configuration
 
 Copy `agent.env.example` to `agent.env` and edit. `agent.env` is gitignored and
-is loaded automatically by `scripts\run.ps1`. Every key also works as a plain
-environment variable or a `-DKEY=value` system property.
+Java loads it automatically from the working directory, including IntelliJ
+runs. Restart the agent after editing. A `-DKEY=value` system property overrides
+an environment variable, which overrides `agent.env`, then the built-in default.
+Keep one entry per key; if a key is repeated, the last entry wins.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -127,7 +133,7 @@ environment variable or a `-DKEY=value` system property.
 | `READER_WATCHDOG_INTERVAL_MS` | `5000` | How often a live session checks the reader link |
 | `AGENT_BIND_ADDRESS` | `0.0.0.0` | Control server bind address |
 | `AGENT_CONTROL_PORT` | `8443` | Control server port, match `RFIDReader.controlPort` |
-| `AGENT_API_KEY` | empty | Optional `x-api-key` required on `/scan/*` |
+| `AGENT_API_KEY` | empty | Optional `x-api-key` required on `/scan/*`, off for the LAN desk |
 | `AGENT_TLS_KEYSTORE` | `certs/agent-keystore.p12` | Keystore, generated if missing |
 | `AGENT_TLS_KEYSTORE_PASSWORD` | `changeit` | Keystore password |
 | `AGENT_TLS_KEYSTORE_TYPE` | `PKCS12` | Keystore type |
@@ -144,6 +150,11 @@ environment variable or a `-DKEY=value` system property.
 No secrets live in source. The API key belongs in `agent.env` or in the service
 environment.
 
+`AGENT_API_KEY` stays empty on the LAN desk. Phase 1 does not require the
+middleware to authenticate to the agent, so `/scan/start` and `/scan/stop` are
+open on the local network. Set it on both sides if the agent ever sits on a
+shared or routed network.
+
 ---
 
 ## Build and run
@@ -153,8 +164,8 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 powershell -ExecutionPolicy Bypass -File scripts\run.ps1
 ```
 
-`build.ps1` compiles `src` into `build\classes`. `run.ps1` loads `agent.env` and
-starts `com.geoplan.rfid.agent.AgentMain`.
+`build.ps1` compiles `src` into `build\classes`. `run.ps1` starts
+`com.geoplan.rfid.agent.AgentMain` from the repo root so Java loads `agent.env`.
 
 Plain commands, if you prefer them:
 
@@ -165,7 +176,14 @@ java -cp "build\classes;$libs\UhfRfidAPI.jar;$libs\RXTXcomm.jar" com.geoplan.rfi
 ```
 
 In IntelliJ, add both jars as libraries (File > Project Structure > Libraries),
-then run `AgentMain`.
+then run `AgentMain` with the working directory set to the project root. The
+included **Reader agent** run configuration already uses that directory.
+
+Configuration/header regression checks (no reader hardware required):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tests\run-config-tests.ps1
+```
 
 A healthy start looks like this:
 
@@ -226,12 +244,19 @@ curl.exe -k https://localhost:8443/health
 ```
 
 ### 3. Register the reader in the middleware
-
 The `RFIDReader` row needs:
 
-- `ip` set to the desk PC LAN address that the middleware can reach, not the
-  reader address. The middleware connects to the agent, and the agent connects
-  to the R400.
+- `ip` set to the desk PC address on the network the middleware can route to,
+  not the reader address. The middleware connects to the agent, and the agent
+  connects to the R400.
+
+  The desk PC has two: `192.168.1.10` on the reader segment, which usually holds
+  only the PC and the R400, and its office LAN address, `10.10.0.84` on the
+  current machine. Use the office LAN address when the middleware runs on
+  another box, and `127.0.0.1` when it runs on the desk PC itself. The generated
+  certificate covers all of them, so either choice works over TLS. Confirm the
+  route with `curl -k https://<that-ip>:8443/health` from the middleware host
+  before saving the row.
 - `controlPort` set to `8443`, or left null since the middleware defaults to
   8443.
 - status `ACTIVE`.
