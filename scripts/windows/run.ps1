@@ -1,6 +1,6 @@
-# Runs the agent. Build first with scripts\build.ps1.
+# Runs the agent in the foreground. Build first with scripts\windows\build.ps1.
 #
-#   powershell -ExecutionPolicy Bypass -File scripts\run.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts\windows\run.ps1
 #
 # Java loads agent.env in the repo root; environment variables can override it.
 
@@ -10,7 +10,8 @@ $root = Get-RepoRoot
 $classes = Join-Path $root 'build\classes'
 
 if (-not (Test-Path (Join-Path $classes 'com\geoplan\rfid\agent\AgentMain.class'))) {
-    throw "build\classes is missing or stale. Run scripts\build.ps1 first."
+    Write-Host "build\classes is missing or stale. Compiling first..."
+    & (Join-Path $PSScriptRoot 'build.ps1')
 }
 
 $java = Get-JavaTool -Name 'java'

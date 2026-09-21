@@ -159,13 +159,25 @@ shared or routed network.
 
 ## Build and run
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build.ps1
-powershell -ExecutionPolicy Bypass -File scripts\run.ps1
+### Linux
+```bash
+./scripts/linux/build.sh
+./scripts/linux/run.sh
+
+# Or in background:
+./scripts/linux/start-background.sh
 ```
 
-`build.ps1` compiles `src` into `build\classes`. `run.ps1` starts
-`com.geoplan.rfid.agent.AgentMain` from the repo root so Java loads `agent.env`.
+### Windows
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\build.ps1
+powershell -ExecutionPolicy Bypass -File scripts\windows\run.ps1
+
+# Or in background:
+powershell -ExecutionPolicy Bypass -File scripts\windows\start-background.ps1
+```
+
+See [DEPLOY.md](DEPLOY.md) for full Linux (systemd) and Windows (NSSM service / Task Scheduler) background deployment guides.
 
 Plain commands, if you prefer them:
 
