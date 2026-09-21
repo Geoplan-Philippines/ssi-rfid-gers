@@ -25,6 +25,7 @@ public final class AgentConfig {
     public final long simulatedIntervalMs;
     public final int readerTagFilteringTimeMs;
     public final long readerWatchdogIntervalMs;
+    public final String readerAntennas;
 
     /* Control server */
     public final String bindAddress;
@@ -59,6 +60,7 @@ public final class AgentConfig {
         simulatedIntervalMs = Env.millis("SIMULATOR_INTERVAL_MS", 500, 10, 60000);
         readerTagFilteringTimeMs = Env.integer("READER_TAG_FILTERING_TIME_MS", 0, 0, 65535);
         readerWatchdogIntervalMs = Env.millis("READER_WATCHDOG_INTERVAL_MS", 5000, 500, 300000);
+        readerAntennas = Env.string("READER_ANTENNAS", "1,2");
 
         bindAddress = Env.string("AGENT_BIND_ADDRESS", "0.0.0.0");
         controlPort = Env.integer("AGENT_CONTROL_PORT", 8443, 1, 65535);
@@ -98,6 +100,7 @@ public final class AgentConfig {
     public void logSummary() {
         Log.info("Reader          : " + (simulated ? "SIMULATOR" : readerHost + ":" + readerPort)
                 + " (name=" + readerName + ")");
+        Log.info("Antennas        : " + readerAntennas);
         Log.info("Control server  : https://" + bindAddress + ":" + controlPort
                 + " (auth=" + (controlApiKey.isEmpty() ? "none" : "x-api-key") + ")");
         Log.info("TLS keystore    : " + keystorePath + " (" + keystoreType + ")");

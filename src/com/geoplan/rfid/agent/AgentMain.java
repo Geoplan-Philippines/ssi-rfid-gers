@@ -19,6 +19,10 @@ import com.geoplan.rfid.agent.util.Log;
 public final class AgentMain {
 
     public static void main(String[] args) {
+        if (System.getProperty("os.name", "").toLowerCase().contains("linux")) {
+            Utils.APIPath.folderName = "/tmp/";
+        }
+
         AgentConfig config = AgentConfig.load();
 
         Log.info("SSI RMK reader agent starting");
