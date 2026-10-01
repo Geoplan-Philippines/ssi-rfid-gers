@@ -1,5 +1,6 @@
 package com.geoplan.rfid.agent;
 
+import com.geoplan.rfid.agent.command.CommandPoller;
 import com.geoplan.rfid.agent.config.AgentConfig;
 import com.geoplan.rfid.agent.http.ControlServer;
 import com.geoplan.rfid.agent.middleware.MiddlewareClient;
@@ -35,10 +36,12 @@ public final class AgentMain {
         MiddlewareClient middleware = new MiddlewareClient(config);
         ScanCoordinator coordinator = new ScanCoordinator(config, reader, middleware);
         ControlServer controlServer = new ControlServer(config, coordinator);
+        CommandPoller commandPoller = new CommandPoller(config, coordinator);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             Log.info("Shutting down");
 
+            commandPoller.stop();
             controlServer.stop();
             coordinator.stopAll();
             reader.close();
@@ -60,10 +63,11 @@ public final class AgentMain {
          * /scan/start reconnects anyway.
          */
         if (!reader.connect()) {
-            Log.warn("Reader " + reader.describe() + " is not reachable yet. /scan/start will retry.");
+            Log.warn("Reader " + reader.describe() + " is not reachable yet. A START command will retry.");
         }
 
-        Log.info("Ready. Waiting for POST /scan/start from the middleware.");
+        commandPoller.start();
+        Log.info("Ready. Waiting for outbound-polled reader commands.");
 
         try {
             Thread.currentThread().join();
