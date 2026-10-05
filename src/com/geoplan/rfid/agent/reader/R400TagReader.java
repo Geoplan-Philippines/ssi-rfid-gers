@@ -1,9 +1,11 @@
 package com.geoplan.rfid.agent.reader;
 
 import JavaAPI.Core.ErrInfo;
+import JavaAPI.Entities.AntennaStatus;
 import JavaAPI.Entities.ConnectResponse;
 import JavaAPI.Entities.ReadTagParameter;
 import JavaAPI.Entities.RxdTagData;
+import JavaAPI.Protocol.VRP.MsgAntennaConfig;
 import JavaAPI.Protocol.VRP.MsgPowerOff;
 import JavaAPI.Protocol.VRP.MsgTagInventory;
 import JavaAPI.Protocol.VRP.Reader;
@@ -13,6 +15,8 @@ import Utils.Event;
 import com.geoplan.rfid.agent.config.AgentConfig;
 import com.geoplan.rfid.agent.util.Epc;
 import com.geoplan.rfid.agent.util.Log;
+
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * iData R400 adapter over the vendor VRP SDK. The connection and inventory
@@ -29,6 +33,7 @@ public final class R400TagReader implements TagReader {
 
     private final AgentConfig config;
     private final Object lock = new Object();
+    private final ConcurrentHashMap<String, Long> lastLoggedTime = new ConcurrentHashMap<>();
 
     private volatile EpcListener listener;
     private volatile boolean inventoryRunning;
@@ -79,6 +84,8 @@ public final class R400TagReader implements TagReader {
                 Log.info("Reader connected"
                         + " | model=" + safe(candidate.getModelNumber())
                         + " | firmware=" + safe(candidate.getSoftwareVersion()));
+
+                applyAntennaConfig(candidate);
 
                 return true;
             } catch (Exception e) {
@@ -205,6 +212,14 @@ public final class R400TagReader implements TagReader {
                 return;
             }
 
+            byte antenna = tagData.getAntenna();
+            String key = antenna + ":" + epc;
+            long now = System.currentTimeMillis();
+            Long last = lastLoggedTime.put(key, now);
+            if (last == null || now - last > 1500) {
+                Log.info(String.format("📡 [Antenna %d] Read tag: %s (RSSI: %.1f dBm)", antenna, epc, tagData.GetRSSI()));
+            }
+
             EpcListener target = listener;
 
             if (target != null) {
@@ -232,6 +247,38 @@ public final class R400TagReader implements TagReader {
 
         reader = null;
         inventoryRunning = false;
+    }
+
+    private void applyAntennaConfig(Reader candidate) {
+        try {
+            boolean[] enabled = new boolean[5];
+            for (String part : config.readerAntennas.split(",")) {
+                String trimmed = part.trim();
+                if (!trimmed.isEmpty()) {
+                    int p = Integer.parseInt(trimmed);
+                    if (p >= 1 && p <= 4) {
+                        enabled[p] = true;
+                    }
+                }
+            }
+
+            AntennaStatus[] antennas = new AntennaStatus[4];
+            for (byte i = 1; i <= 4; i++) {
+                AntennaStatus status = new AntennaStatus();
+                status.AntennaNO = i;
+                status.IsEnable = enabled[i];
+                antennas[i - 1] = status;
+            }
+
+            MsgAntennaConfig msg = new MsgAntennaConfig(antennas);
+            if (candidate.Send(msg)) {
+                Log.info("Antennas configured | active ports=" + config.readerAntennas);
+            } else {
+                Log.warn("Failed to apply antenna configuration to reader");
+            }
+        } catch (Exception e) {
+            Log.warn("Failed setting antenna configuration", e);
+        }
     }
 
     private static String safe(String value) {

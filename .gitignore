@@ -43,3 +43,6 @@ agent.env.*
 libs/
 *.class
 *.log
+*.pid
+logs/
+jdk/

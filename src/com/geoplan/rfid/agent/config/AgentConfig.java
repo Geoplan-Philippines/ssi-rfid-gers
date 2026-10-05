@@ -25,6 +25,8 @@ public final class AgentConfig {
     public final long simulatedIntervalMs;
     public final int readerTagFilteringTimeMs;
     public final long readerWatchdogIntervalMs;
+    public final String readerAntennas;
+    public final long stopFlushTimeoutMs;
 
     /* Control server */
     public final String bindAddress;
@@ -43,6 +45,13 @@ public final class AgentConfig {
     public final String middlewareApiKey;
     public final long middlewareTimeoutMs;
 
+    /* Outbound command polling */
+    public final String readerId;
+    public final String commandPollPath;
+    public final String commandAckPathTemplate;
+    public final long commandPollRequestTimeoutMs;
+    public final long commandRetryDelayMs;
+
     /* Batching */
     public final int batchSize;
     public final long flushIntervalMs;
@@ -59,8 +68,10 @@ public final class AgentConfig {
         simulatedIntervalMs = Env.millis("SIMULATOR_INTERVAL_MS", 500, 10, 60000);
         readerTagFilteringTimeMs = Env.integer("READER_TAG_FILTERING_TIME_MS", 0, 0, 65535);
         readerWatchdogIntervalMs = Env.millis("READER_WATCHDOG_INTERVAL_MS", 5000, 500, 300000);
+        readerAntennas = Env.string("READER_ANTENNAS", "1,2");
+        stopFlushTimeoutMs = Env.millis("EPC_STOP_FLUSH_TIMEOUT_MS", 15000, 1000, 120000);
 
-        bindAddress = Env.string("AGENT_BIND_ADDRESS", "0.0.0.0");
+        bindAddress = Env.string("AGENT_BIND_ADDRESS", "127.0.0.1");
         controlPort = Env.integer("AGENT_CONTROL_PORT", 8443, 1, 65535);
         controlApiKey = Env.optional("AGENT_API_KEY");
 
@@ -76,6 +87,20 @@ public final class AgentConfig {
         );
         middlewareApiKey = Env.optional("MIDDLEWARE_API_KEY");
         middlewareTimeoutMs = Env.millis("MIDDLEWARE_TIMEOUT_MS", 5000, 250, 120000);
+
+        readerId = Env.optional("READER_ID");
+        commandPollPath = Env.string(
+                "COMMAND_POLL_PATH",
+                "/api/v1/reader-agent/commands/poll"
+        );
+        commandAckPathTemplate = Env.string(
+                "COMMAND_ACK_PATH",
+                "/api/v1/reader-agent/commands/{commandId}/ack"
+        );
+        commandPollRequestTimeoutMs = Env.millis(
+                "COMMAND_POLL_REQUEST_TIMEOUT_MS", 30000, 5000, 120000
+        );
+        commandRetryDelayMs = Env.millis("COMMAND_RETRY_DELAY_MS", 1000, 250, 60000);
 
         batchSize = Env.integer("EPC_BATCH_SIZE", 200, 1, 1000);
         flushIntervalMs = Env.millis("EPC_FLUSH_INTERVAL_MS", 1000, 100, 60000);
@@ -94,21 +119,35 @@ public final class AgentConfig {
         return middlewareBaseUrl + readsPathTemplate.replace("{sessionId}", sessionId);
     }
 
+    public String commandPollUrl() {
+        return middlewareBaseUrl + commandPollPath;
+    }
+
+    public String commandAckUrl(String commandId) {
+        return middlewareBaseUrl + commandAckPathTemplate.replace("{commandId}", commandId);
+    }
+
     /** Logs the effective configuration with secrets redacted. */
     public void logSummary() {
         Log.info("Reader          : " + (simulated ? "SIMULATOR" : readerHost + ":" + readerPort)
                 + " (name=" + readerName + ")");
+        Log.info("Antennas        : " + readerAntennas);
         Log.info("Control server  : https://" + bindAddress + ":" + controlPort
                 + " (auth=" + (controlApiKey.isEmpty() ? "none" : "x-api-key") + ")");
         Log.info("TLS keystore    : " + keystorePath + " (" + keystoreType + ")");
         Log.info("Middleware      : " + readsUrl("{sessionId}")
                 + " (x-api-key=" + (middlewareApiKey.isEmpty() ? "MISSING" : "set") + ")");
+        Log.info("Command polling : " + commandPollUrl()
+                + " (readerId=" + (readerId.isEmpty() ? "MISSING" : readerId) + ")");
         Log.info("Batching        : size=" + batchSize + " flush=" + flushIntervalMs + "ms"
-                + " maxPending=" + maxPendingEpcs);
+                + " maxPending=" + maxPendingEpcs + " stopFlush=" + stopFlushTimeoutMs + "ms");
         Log.info("Start conflict  : " + startConflictPolicy);
 
         if (middlewareApiKey.isEmpty()) {
-            Log.warn("MIDDLEWARE_API_KEY is not set. Reads will be rejected unless the middleware allows anonymous appends.");
+            Log.warn("MIDDLEWARE_API_KEY is not set. Reads and command polling will be rejected.");
+        }
+        if (readerId.isEmpty()) {
+            Log.warn("READER_ID is not set. Outbound command polling is disabled.");
         }
     }
 

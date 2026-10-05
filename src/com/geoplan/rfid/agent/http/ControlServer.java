@@ -144,7 +144,8 @@ public final class ControlServer {
                     "status", "stopped",
                     "sessionId", result.sessionId(),
                     "uniqueEpcs", result.unique(),
-                    "sentEpcs", result.sent()
+                    "sentEpcs", result.sent(),
+                    "pendingEpcs", result.pending()
             ));
             case NOT_RUNNING -> respond(exchange, 200, Json.object(
                     "status", "not_running",

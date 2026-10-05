@@ -49,7 +49,8 @@ public final class ScanCoordinator implements EpcListener {
     public record StartResult(StartStatus status, String sessionId, String replacedSessionId) {
     }
 
-    public record StopResult(StopStatus status, String sessionId, String activeSessionId, long unique, long sent) {
+    public record StopResult(StopStatus status, String sessionId, String activeSessionId,
+                             long unique, long sent, int pending) {
     }
 
     public record Health(boolean readerConnected, boolean inventoryRunning, String readerTarget,
@@ -151,19 +152,31 @@ public final class ScanCoordinator implements EpcListener {
             ScanSession current = active;
 
             if (current == null) {
-                Log.info("Stop for " + sessionId + " ignored, no session is active");
-                return new StopResult(StopStatus.NOT_RUNNING, sessionId, null, 0, 0);
+                ScanSession stopped = findDrainingSession(sessionId);
+                if (stopped == null) {
+                    Log.info("Stop for " + sessionId + " ignored, no session is active");
+                    return new StopResult(StopStatus.NOT_RUNNING, sessionId, null, 0, 0, 0);
+                }
+
+                flush(stopped, System.currentTimeMillis() + config.stopFlushTimeoutMs);
+                if (stopped.pending() == 0) {
+                    draining.remove(stopped);
+                }
+                return new StopResult(StopStatus.STOPPED, sessionId, null,
+                        stopped.unique(), stopped.sent(), stopped.pending());
             }
 
             if (!current.sessionId().equals(sessionId)) {
                 Log.warn("Stop for " + sessionId + " ignored, active session is " + current.sessionId());
-                return new StopResult(StopStatus.SESSION_MISMATCH, sessionId, current.sessionId(), 0, 0);
+                return new StopResult(StopStatus.SESSION_MISMATCH, sessionId,
+                        current.sessionId(), 0, 0, 0);
             }
 
             active = null;
             closeSession(current, "stopped by middleware");
 
-            return new StopResult(StopStatus.STOPPED, sessionId, null, current.unique(), current.sent());
+            return new StopResult(StopStatus.STOPPED, sessionId, null,
+                    current.unique(), current.sent(), current.pending());
         }
     }
 
@@ -216,7 +229,7 @@ public final class ScanCoordinator implements EpcListener {
         session.stopAccepting();
         reader.stopInventory();
 
-        long deadline = System.currentTimeMillis() + Math.min(config.middlewareTimeoutMs, 3000);
+        long deadline = System.currentTimeMillis() + config.stopFlushTimeoutMs;
         flush(session, deadline);
 
         if (session.pending() > 0) {
@@ -287,7 +300,19 @@ public final class ScanCoordinator implements EpcListener {
                     case DROPPED -> session.recordDropped(batch.size());
                     case RETRY -> {
                         session.requeue(batch);
-                        return;
+                        if (deadlineMillis <= 0) {
+                            return;
+                        }
+                        long remaining = deadlineMillis - System.currentTimeMillis();
+                        if (remaining <= 0) {
+                            return;
+                        }
+                        try {
+                            Thread.sleep(Math.min(200, remaining));
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            return;
+                        }
                     }
                     case SESSION_CLOSED -> {
                         session.requeue(batch);
@@ -297,6 +322,15 @@ public final class ScanCoordinator implements EpcListener {
                 }
             }
         }
+    }
+
+    private ScanSession findDrainingSession(String sessionId) {
+        for (ScanSession session : draining.keySet()) {
+            if (session.sessionId().equals(sessionId)) {
+                return session;
+            }
+        }
+        return null;
     }
 
     /** The middleware says this session is closed. Stop scanning for it. */

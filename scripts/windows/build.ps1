@@ -1,6 +1,6 @@
 # Compiles the agent into build\classes.
 #
-#   powershell -ExecutionPolicy Bypass -File scripts\build.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts\windows\build.ps1
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 

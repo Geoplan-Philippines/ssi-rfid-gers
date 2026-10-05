@@ -4,7 +4,7 @@
 $ErrorActionPreference = 'Stop'
 
 function Get-RepoRoot {
-    return (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+    return (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 }
 
 # Folder holding UhfRfidAPI.jar and RXTXcomm.jar.
@@ -41,6 +41,13 @@ function Get-SdkClassPath {
 function Get-JavaTool {
     param([string]$Name)
 
+    # 1. Bundled portable JDK in <repo>\jdk
+    $bundled = Join-Path (Get-RepoRoot) "jdk\bin\$Name.exe"
+    if (Test-Path $bundled) {
+        return (Resolve-Path $bundled).Path
+    }
+
+    # 2. JAVA_HOME environment variable
     if ($env:JAVA_HOME) {
         $fromHome = Join-Path $env:JAVA_HOME "bin\$Name.exe"
 
