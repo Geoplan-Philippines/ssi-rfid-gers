@@ -19,7 +19,7 @@ This guide describes how to configure, deploy, and run the **SSI RMK Reader Agen
 ```
 
 - **Agent Control Server**: HTTPS on port `8443` (accepts start/stop commands from Middleware).
-- **Reader Connection**: TCP client to `192.168.1.100:9090` (continuous inventory).
+- **Reader Connection**: TCP client on port `9090` (factory default: `192.168.1.100:9090`; production desk assigned static IP, e.g. `172.16.210.200:9090`).
 - **Middleware Push**: HTTP/HTTPS POST to `{MIDDLEWARE_BASE_URL}/api/v1/epc-scan-processing/sessions/{sessionId}/reads`.
 
 ---
@@ -146,7 +146,8 @@ Create or edit `agent.env` in the root of `ssi-rfid-gers`:
 
 ```properties
 # --- Reader Hardware Settings ---
-READER_HOST=192.168.1.100
+# Factory default is 192.168.1.100:9090. On warehouse/office LAN, assign a static IP on the subnet:
+READER_HOST=172.16.210.200
 READER_PORT=9090
 READER_NAME=Device1
 READER_MODE=hardware
@@ -157,8 +158,8 @@ AGENT_BIND_ADDRESS=0.0.0.0
 AGENT_CONTROL_PORT=8443
 
 # --- Middleware Connection ---
-MIDDLEWARE_BASE_URL=http://localhost:8000
-MIDDLEWARE_API_KEY=rfid_-RlBoXJNcJgDhVJEbobSRJ_0K6PQMmLTf3FLBkuembQ
+MIDDLEWARE_BASE_URL=https://api-stg-sling.rgoc.com.ph
+MIDDLEWARE_API_KEY=rfid_BiJ2iO2ywe9ifihVXlTYZGaLTB_SodUP4-7HK8IWug4
 
 # --- Batching & Flush Settings ---
 EPC_FLUSH_INTERVAL_MS=1000
@@ -169,7 +170,53 @@ EPC_BATCH_SIZE=50
 
 ---
 
-## 4. Linux Deployment
+## 4. Reader Hardware Network Setup & IP Migration (iData R400 / RM720X)
+
+### Factory Default Behavior
+Out of the box, the iData R400 (model RM720X) uses:
+- **Default IP**: `192.168.1.100`
+- **TCP Port**: `9090` (Server / listening mode)
+- **Subnet Mask**: `255.255.255.0`
+- **Gateway**: `192.168.1.1`
+- **DHCP**: **Disabled** by default.
+
+When plugged into an enterprise or warehouse switch whose subnet is different (e.g. `172.16.210.0/24`), the reader **will not** receive a DHCP IP automatically. Because the host PC and reader reside in different IP subnets, normal TCP connections to `192.168.1.100:9090` will fail with `Connection timed out`.
+
+---
+
+### Automated Reader IP Migration Tool (`change-reader-ip.ps1`)
+
+An automated utility is provided in `scripts\windows\change-reader-ip.ps1` that flashes the reader's internal IP address to match your local network:
+
+```powershell
+# Run in PowerShell as Administrator:
+powershell -ExecutionPolicy Bypass -File scripts\windows\change-reader-ip.ps1 -NewIP 172.16.210.200 -NewSubnet 255.255.255.0 -NewGateway 172.16.210.250
+```
+
+#### What the script does:
+1. Temporarily assigns `192.168.1.10` to your PC's Ethernet interface.
+2. Waits for link stabilization and sends low-level ARP probes to locate the reader at `192.168.1.100`.
+3. Connects over port `9090` using the vendor VRP protocol (`MsgIpAddressConfig`) and flashes the reader to the new static IP (`172.16.210.200`). **The reader will emit an audible beep** when the new configuration is applied and its network stack reboots.
+4. Restores your PC's network adapter back to DHCP in a guaranteed `finally` block (restoring internet access).
+5. Automatically updates `READER_HOST` in `agent.env` and `.env`.
+
+#### Switch Port Isolation Fallback (Direct Cable)
+If your managed switch (e.g. Cisco Meraki) has 802.1X, port security, or client isolation that drops `192.168.1.x` packets:
+1. Unplug the reader's Ethernet cable from the switch.
+2. Plug the cable directly into your PC's Ethernet port.
+3. Run `scripts\windows\change-reader-ip.ps1 -NewIP 172.16.210.200`.
+4. Once the reader beeps and reports success, plug both the PC and the reader back into the switch.
+
+#### Verify Reader Connectivity
+After migration, test that the reader responds on its new IP:
+```powershell
+Test-NetConnection -ComputerName 172.16.210.200 -Port 9090
+```
+Expected output: `TcpTestSucceeded : True`.
+
+---
+
+## 5. Linux Deployment
 
 ### Method A: Background Scripts (Recommended for Quick Desk Setup)
 
@@ -243,7 +290,7 @@ To automatically start the agent on boot and restart on crash:
 
 ---
 
-## 5. Windows Deployment
+## 6. Windows Deployment
 
 ### Method A: Background PowerShell Scripts
 
@@ -283,6 +330,28 @@ NSSM (Non-Sucking Service Manager) allows running the Java agent as a true Windo
    ```
    *(To uninstall: `powershell -ExecutionPolicy Bypass -File scripts\windows\uninstall-service.ps1`)*
 
+   **Managing the Service:**
+   ```powershell
+   # Start the service
+   nssm start SSIRfidAgent
+   # or: Start-Service SSIRfidAgent
+
+   # Stop the service
+   nssm stop SSIRfidAgent
+   # or: Stop-Service SSIRfidAgent
+
+   # Restart the service
+   nssm restart SSIRfidAgent
+   # or: Restart-Service SSIRfidAgent
+
+   # Check status
+   nssm status SSIRfidAgent
+   # or: Get-Service SSIRfidAgent
+
+   # View live logs
+   Get-Content logs\agent.log -Tail 30 -Wait
+   ```
+
    **Or Manual setup via NSSM commands:**
    ```powershell
    # 1. Resolve variables in current directory
@@ -299,11 +368,6 @@ NSSM (Non-Sucking Service Manager) allows running the Java agent as a true Windo
 
    # 3. Start Service
    nssm start SSIRfidAgent
-   ```
-3. Verify or stop service:
-   ```powershell
-   nssm status SSIRfidAgent
-   nssm stop SSIRfidAgent
    ```
 
 ---
@@ -323,7 +387,7 @@ NSSM (Non-Sucking Service Manager) allows running the Java agent as a true Windo
 
 ---
 
-## 6. Verification & Health Monitoring
+## 7. Verification & Health Monitoring
 
 Test the agent control server from the local machine or over LAN:
 
@@ -335,7 +399,7 @@ Expected JSON Response:
 ```json
 {
   "status": "ok",
-  "reader": "192.168.1.100:9090",
+  "reader": "172.16.210.200:9090",
   "readerConnected": true,
   "inventoryRunning": false,
   "activeSessionId": null,
@@ -349,29 +413,35 @@ Expected JSON Response:
 | Field | Expected Healthy Value | Meaning |
 | :--- | :--- | :--- |
 | `status` | `"ok"` | Control HTTP server is responsive. |
-| `readerConnected` | `true` | TCP connection to `192.168.1.100:9090` is established. |
+| `readerConnected` | `true` | TCP connection to `READER_HOST:9090` is established. |
 | `inventoryRunning` | `true` / `false` | `true` when a warehouse scan is in progress. |
 | `activeSessionId` | UUID / `null` | The active scan session ID receiving tag reads. |
 
 ---
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 ### 1. `Address already in use: bind` on Port 8443
 Another instance of the agent is already running.
 - **Linux**: Run `./scripts/stop.sh` or check `lsof -i :8443` and kill the PID.
-- **Windows**: Run `powershell -File scripts\stop.ps1` or run `Get-NetTCPConnection -LocalPort 8443`.
+- **Windows**: Run `powershell -File scripts\windows\stop.ps1`, or `nssm stop SSIRfidAgent`, or check `Get-NetTCPConnection -LocalPort 8443`.
 
-### 2. `Reader connection failed | code=FF01`
-The R400 reader at `192.168.1.100:9090` cannot be reached:
-- Check Ethernet cable connection and network switch.
-- Verify IP via ping: `ping 192.168.1.100`.
-- Verify port 9090: `nc -zv 192.168.1.100 9090` (Linux) or `Test-NetConnection 192.168.1.100 -Port 9090` (Windows).
+### 2. Reader Connection Fails (`ErrCode:FF19 Connection timed out: connect`)
+The agent cannot reach the reader at `READER_HOST:9090`:
+- **Subnet mismatch (Factory default IP)**: Brand new or reset iData R400 readers default to `192.168.1.100:9090` with DHCP disabled. If your desk network is on another subnet (e.g. `172.16.210.x`), run:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File scripts\windows\change-reader-ip.ps1 -NewIP 172.16.210.200
+  ```
+- **Switch VLAN isolation**: If the corporate switch blocks `192.168.1.x` packets, connect the reader directly to the PC's Ethernet port with a patch cable, run `change-reader-ip.ps1`, and then plug both back into the switch.
+- **Verify reader port**: Check TCP 9090 using PowerShell:
+  ```powershell
+  Test-NetConnection -ComputerName 172.16.210.200 -Port 9090
+  ```
 
 ### 3. Middleware returns HTTP 401 or 403 on Tag Append
 The agent is rejecting or receiving rejection from the Middleware:
 - Verify `MIDDLEWARE_API_KEY` in `agent.env` matches a valid API key record in the Middleware database (`api_keys` table).
-- Verify `MIDDLEWARE_BASE_URL` points to the correct origin (e.g. `http://localhost:8000`).
+- Verify `MIDDLEWARE_BASE_URL` points to the correct origin (e.g. `https://api-stg-sling.rgoc.com.ph` or `http://localhost:8000`).
 
 ### 4. Linux `/tmp/` SDK Path Issue
 The vendor `UhfRfidAPI.jar` SDK expects temporary extraction folders for native library unpacking. `AgentMain.java` automatically sets `Utils.APIPath.folderName = "/tmp/"` on Linux. Ensure `/tmp` is writable by the running user.
