@@ -274,14 +274,22 @@ All scripts reside in the `scripts\windows\` directory:
 
 NSSM (Non-Sucking Service Manager) allows running the Java agent as a true Windows background service that boots before user login.
 
-1. Download NSSM from [nssm.cc](https://nssm.cc/download) and place `nssm.exe` in `C:\Windows\System32` (or your tools path).
-2. Open **PowerShell / CMD as Administrator**:
+1. Ensure `nssm.exe` is available (e.g. in `C:\Program Files\nssm\win64`, `C:\Windows\System32`, or your PATH).
+2. Open **PowerShell as Administrator**:
+
+   **Automated 1-command installation (Recommended):**
    ```powershell
-   # Variables
-   $AgentDir = "C:\Geoplan\ssi-rfid-gers"
+   powershell -ExecutionPolicy Bypass -File scripts\windows\install-service.ps1
+   ```
+   *(To uninstall: `powershell -ExecutionPolicy Bypass -File scripts\windows\uninstall-service.ps1`)*
+
+   **Or Manual setup via NSSM commands:**
+   ```powershell
+   # 1. Resolve variables in current directory
+   $AgentDir = (Get-Item .).FullName
    $JavaExe = (Get-Command java).Source
 
-   # Install Service
+   # 2. Install & Configure Service (Note: $JavaExe must not be empty or NSSM will open the GUI installer)
    nssm install SSIRfidAgent "$JavaExe"
    nssm set SSIRfidAgent AppDirectory "$AgentDir"
    nssm set SSIRfidAgent AppParameters "-Dfile.encoding=UTF-8 -cp `"build\classes;libs\UhfRfidAPI.jar;libs\RXTXcomm.jar`" com.geoplan.rfid.agent.AgentMain"
@@ -289,7 +297,7 @@ NSSM (Non-Sucking Service Manager) allows running the Java agent as a true Windo
    nssm set SSIRfidAgent AppStderr "$AgentDir\logs\agent.err.log"
    nssm set SSIRfidAgent Start SERVICE_AUTO_START
 
-   # Start Service
+   # 3. Start Service
    nssm start SSIRfidAgent
    ```
 3. Verify or stop service:
