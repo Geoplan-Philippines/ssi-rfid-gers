@@ -7,20 +7,23 @@ This guide describes how to configure, deploy, and run the **SSI RMK Reader Agen
 ## 1. System Architecture
 
 ```
-[ Middleware (NestJS) ]
-        │  ▲
-        │  │  HTTPS POST /api/v1/epc-scan-processing/sessions/{sessionId}/reads
-        │  │  (Header: x-api-key)
-        ▼  │
-[ Reader Agent (Java) ]   <--- Listens on HTTPS port 8443 (POST /scan/start, /scan/stop)
+[ Deployed Middleware (NestJS) ]
+        ▲
+        │  Outbound HTTPS from the agent:
+        │  - long-poll /api/v1/reader-agent/commands/poll
+        │  - acknowledge commands
+        │  - append EPC reads
+        │  (Header: x-api-key)
+[ Reader Agent / GERS (Java on Windows Server) ]
         │
         ▼  TCP socket port 9090
 [ iData R400 / RM720X Reader ]  (Connected to physical antennas 1, 2)
 ```
 
-- **Agent Control Server**: HTTPS on port `8443` (accepts start/stop commands from Middleware).
-- **Reader Connection**: TCP client on port `9090` (factory default: `192.168.1.100:9090`; production desk assigned static IP, e.g. `172.16.210.200:9090`).
-- **Middleware Push**: HTTP/HTTPS POST to `{MIDDLEWARE_BASE_URL}/api/v1/epc-scan-processing/sessions/{sessionId}/reads`.
+- **Cloud control is outbound-only**: the GERS agent polls the middleware for START/STOP commands. The deployed middleware does not need a route to the Windows server.
+- **Local diagnostics**: HTTPS port `8443` serves `/health` and legacy manual control. It defaults to `127.0.0.1` and does not need an inbound firewall rule for normal cloud operation.
+- **Reader connection**: TCP port `9090` from the Windows server to the R400 (factory default `192.168.1.100:9090`; production example `172.16.210.200:9090`).
+- **Middleware traffic**: outbound HTTPS to `{MIDDLEWARE_BASE_URL}` for command polling, acknowledgements, and EPC reads.
 
 ---
 
@@ -134,9 +137,10 @@ The vendor libraries must reside in the [`libs/`](libs/) directory:
 - `RXTXcomm.jar`
 
 ### Network & Firewall
-- **Port 8443 (TCP inbound)**: Must be open to allow the Middleware to call `/scan/start` and `/scan/stop`.
-- **Port 9090 (TCP outbound)**: Must be reachable from the agent PC to the R400 reader IP (default: `192.168.1.100:9090`).
-- **Port 8000 (TCP outbound)**: Must be reachable from the agent PC to the Middleware API.
+- **R400 TCP 9090 outbound**: Must be reachable from the Windows server to `READER_HOST`.
+- **Middleware HTTPS 443 outbound**: Must be reachable from the Windows server when `MIDDLEWARE_BASE_URL` is an HTTPS deployment. Use the port explicitly present in the URL for a local/nonstandard deployment.
+- **DNS and TLS**: The Windows server must resolve the middleware hostname and trust its public TLS certificate.
+- **Agent TCP 8443 inbound is not required** for current outbound command polling. Keep `AGENT_BIND_ADDRESS=127.0.0.1` unless trusted LAN access to diagnostics is explicitly required.
 
 ---
 
@@ -153,13 +157,15 @@ READER_NAME=Device1
 READER_MODE=hardware
 READER_ANTENNAS=1,2
 
-# --- Agent Control Server ---
-AGENT_BIND_ADDRESS=0.0.0.0
+# --- Local diagnostics ---
+AGENT_BIND_ADDRESS=127.0.0.1
 AGENT_CONTROL_PORT=8443
 
-# --- Middleware Connection ---
+# --- Deployed middleware and outbound command polling ---
 MIDDLEWARE_BASE_URL=https://api-stg-sling.rgoc.com.ph
-MIDDLEWARE_API_KEY=rfid_BiJ2iO2ywe9ifihVXlTYZGaLTB_SodUP4-7HK8IWug4
+MIDDLEWARE_API_KEY=replace-with-an-active-integration-api-key
+# Must be the UUID of this ACTIVE row in the deployed middleware's RFID Readers screen.
+READER_ID=replace-with-rfid-reader-uuid
 
 # --- Batching & Flush Settings ---
 EPC_FLUSH_INTERVAL_MS=1000
@@ -194,11 +200,13 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\change-reader-ip.ps1 -N
 ```
 
 #### What the script does:
-1. Temporarily assigns `192.168.1.10` to your PC's Ethernet interface.
-2. Waits for link stabilization and sends low-level ARP probes to locate the reader at `192.168.1.100`.
-3. Connects over port `9090` using the vendor VRP protocol (`MsgIpAddressConfig`) and flashes the reader to the new static IP (`172.16.210.200`). **The reader will emit an audible beep** when the new configuration is applied and its network stack reboots.
-4. Restores your PC's network adapter back to DHCP in a guaranteed `finally` block (restoring internet access).
-5. Automatically updates `READER_HOST` in `agent.env` and `.env`.
+1. Stops `SSIRfidAgent` when it is running so the vendor utility can use the reader connection.
+2. Adds `192.168.1.10/24` as a **temporary secondary address**. It does not replace the server's existing static/DHCP address, gateway, or DNS, so middleware connectivity is preserved.
+3. Checks for an IP conflict, connects through port `9090`, and applies the new static R400 settings using `MsgIpAddressConfig`.
+4. Removes only the temporary secondary address in a `finally` block.
+5. Updates `READER_HOST` in `agent.env`, restarts the service, checks the new reader endpoint, and runs full deployed middleware verification.
+
+If the R400 was already migrated, supply its current address explicitly, for example `-CurrentIP 172.16.210.200`. The source IP defaults to the factory address only for first-time migration.
 
 #### Switch Port Isolation Fallback (Direct Cable)
 If your managed switch (e.g. Cisco Meraki) has 802.1X, port security, or client isolation that drops `192.168.1.x` packets:
@@ -328,6 +336,8 @@ NSSM (Non-Sucking Service Manager) allows running the Java agent as a true Windo
    ```powershell
    powershell -ExecutionPolicy Bypass -File scripts\windows\install-service.ps1
    ```
+   Installation now verifies the R400 connection, local agent health, deployed middleware health, API key, `READER_ID`, ACTIVE reader status, and outbound agent heartbeat. Use `-SkipVerification` only for an intentional offline installation.
+
    *(To uninstall: `powershell -ExecutionPolicy Bypass -File scripts\windows\uninstall-service.ps1`)*
 
    **Managing the Service:**
@@ -389,10 +399,22 @@ NSSM (Non-Sucking Service Manager) allows running the Java agent as a true Windo
 
 ## 7. Verification & Health Monitoring
 
-Test the agent control server from the local machine or over LAN:
+On Windows, verify the complete path without claiming a real scan command:
 
-```bash
-curl -k https://<AGENT_IP>:8443/health
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\verify-deployment.ps1 -RequireService
+```
+
+The final line must be:
+
+```text
+SUCCESS: R400 -> GERS agent -> deployed middleware connectivity is healthy.
+```
+
+For local agent health only:
+
+```powershell
+curl.exe -k https://127.0.0.1:8443/health
 ```
 
 Expected JSON Response:
@@ -438,10 +460,13 @@ The agent cannot reach the reader at `READER_HOST:9090`:
   Test-NetConnection -ComputerName 172.16.210.200 -Port 9090
   ```
 
-### 3. Middleware returns HTTP 401 or 403 on Tag Append
-The agent is rejecting or receiving rejection from the Middleware:
-- Verify `MIDDLEWARE_API_KEY` in `agent.env` matches a valid API key record in the Middleware database (`api_keys` table).
-- Verify `MIDDLEWARE_BASE_URL` points to the correct origin (e.g. `https://api-stg-sling.rgoc.com.ph` or `http://localhost:8000`).
+### 3. Middleware connection or heartbeat fails
+Run `scripts\windows\verify-deployment.ps1 -RequireService` and check each failing stage.
+- `MIDDLEWARE_API_KEY` must match an active integration API key in the deployed database.
+- `READER_ID` must match the UUID of the same ACTIVE reader row in the deployed middleware.
+- `MIDDLEWARE_BASE_URL` must be the deployed origin, without `/api/v1` appended.
+- The Windows server needs outbound DNS/HTTPS access. No middleware-to-Windows inbound route is required.
+- HTTP 404 on command polling usually means the deployed middleware is older than the reader-command-queue release or its database migration was not applied.
 
 ### 4. Linux `/tmp/` SDK Path Issue
 The vendor `UhfRfidAPI.jar` SDK expects temporary extraction folders for native library unpacking. `AgentMain.java` automatically sets `Utils.APIPath.folderName = "/tmp/"` on Linux. Ensure `/tmp` is writable by the running user.
