@@ -37,14 +37,18 @@ public final class ControlServer {
     private static final int MAX_BODY_BYTES = 64 * 1024;
 
     private final AgentConfig config;
-    private final ScanCoordinator coordinator;
+    private final List<ScanCoordinator> coordinators;
 
     private HttpsServer server;
     private ExecutorService executor;
 
     public ControlServer(AgentConfig config, ScanCoordinator coordinator) {
+        this(config, List.of(coordinator));
+    }
+
+    public ControlServer(AgentConfig config, List<ScanCoordinator> coordinators) {
         this.config = config;
-        this.coordinator = coordinator;
+        this.coordinators = List.copyOf(coordinators);
     }
 
     public void start() throws Exception {
@@ -101,10 +105,22 @@ public final class ControlServer {
                 return;
             }
 
+            String readerId = Json.readString(body, "readerId");
+            String readerName = Json.readString(body, "readerName");
+            ScanCoordinator target = resolveCoordinator(sessionId, readerId, readerName, isStart);
+            if (target == null) {
+                respond(exchange, 404, Json.object(
+                        "error", "reader_not_found",
+                        "readerId", readerId,
+                        "readerName", readerName
+                ));
+                return;
+            }
+
             if (isStart) {
-                respondToStart(exchange, coordinator.start(sessionId));
+                respondToStart(exchange, target, target.start(sessionId));
             } else {
-                respondToStop(exchange, coordinator.stop(sessionId));
+                respondToStop(exchange, target.stop(sessionId));
             }
         } catch (Exception e) {
             Log.error("Control request failed", e);
@@ -114,16 +130,63 @@ public final class ControlServer {
         }
     }
 
-    private void respondToStart(HttpExchange exchange, ScanCoordinator.StartResult result) throws IOException {
+    private ScanCoordinator resolveCoordinator(
+            String sessionId,
+            String readerId,
+            String readerName,
+            boolean isStart
+    ) {
+        if (readerId != null && !readerId.isBlank()) {
+            for (ScanCoordinator coordinator : coordinators) {
+                if (coordinator.matchesReaderId(readerId.trim())) {
+                    return coordinator;
+                }
+            }
+            return null;
+        }
+
+        if (readerName != null && !readerName.isBlank()) {
+            for (ScanCoordinator coordinator : coordinators) {
+                if (coordinator.matchesReaderName(readerName.trim())) {
+                    return coordinator;
+                }
+            }
+            return null;
+        }
+
+        for (ScanCoordinator coordinator : coordinators) {
+            if (coordinator.hasSession(sessionId)) {
+                return coordinator;
+            }
+        }
+
+        if (isStart) {
+            for (ScanCoordinator coordinator : coordinators) {
+                if (coordinator.health().activeSessionId() == null) {
+                    return coordinator;
+                }
+            }
+        }
+
+        return coordinators.get(0);
+    }
+
+    private void respondToStart(
+            HttpExchange exchange,
+            ScanCoordinator coordinator,
+            ScanCoordinator.StartResult result
+    ) throws IOException {
         switch (result.status()) {
             case STARTED, ALREADY_RUNNING -> respond(exchange, 200, Json.object(
                     "status", result.status() == ScanCoordinator.StartStatus.STARTED ? "started" : "already_running",
-                    "sessionId", result.sessionId()
+                    "sessionId", result.sessionId(),
+                    "readerName", coordinator.readerConfig().readerName()
             ));
             case REPLACED -> respond(exchange, 200, Json.object(
                     "status", "started",
                     "sessionId", result.sessionId(),
-                    "replacedSessionId", result.replacedSessionId()
+                    "replacedSessionId", result.replacedSessionId(),
+                    "readerName", coordinator.readerConfig().readerName()
             ));
             case CONFLICT -> respond(exchange, 409, Json.object(
                     "error", "session_already_active",
@@ -166,17 +229,57 @@ public final class ControlServer {
                 return;
             }
 
-            ScanCoordinator.Health health = coordinator.health();
+            java.util.List<String> readerEntries = new java.util.ArrayList<>();
+            boolean allConnected = !coordinators.isEmpty();
+            boolean anyRunning = false;
+            String firstActiveSession = null;
+            long totalUnique = 0;
+            long totalSent = 0;
+            int totalPending = 0;
+            StringBuilder targets = new StringBuilder();
+
+            for (ScanCoordinator coordinator : coordinators) {
+                ScanCoordinator.Health health = coordinator.health();
+                AgentConfig.ReaderConfig rc = coordinator.readerConfig();
+
+                if (targets.length() > 0) {
+                    targets.append(", ");
+                }
+                targets.append(health.readerTarget());
+
+                allConnected = allConnected && health.readerConnected();
+                anyRunning = anyRunning || health.inventoryRunning();
+                if (firstActiveSession == null && health.activeSessionId() != null) {
+                    firstActiveSession = health.activeSessionId();
+                }
+                totalUnique += health.unique();
+                totalSent += health.sent();
+                totalPending += health.pending();
+
+                readerEntries.add(Json.object(
+                        "readerId", rc.readerId().isEmpty() ? null : rc.readerId(),
+                        "readerName", rc.readerName(),
+                        "reader", health.readerTarget(),
+                        "antennas", rc.readerAntennas(),
+                        "readerConnected", health.readerConnected(),
+                        "inventoryRunning", health.inventoryRunning(),
+                        "activeSessionId", health.activeSessionId(),
+                        "uniqueEpcs", health.unique(),
+                        "sentEpcs", health.sent(),
+                        "pendingEpcs", health.pending()
+                ));
+            }
 
             respond(exchange, 200, Json.object(
                     "status", "ok",
-                    "reader", health.readerTarget(),
-                    "readerConnected", health.readerConnected(),
-                    "inventoryRunning", health.inventoryRunning(),
-                    "activeSessionId", health.activeSessionId(),
-                    "uniqueEpcs", health.unique(),
-                    "sentEpcs", health.sent(),
-                    "pendingEpcs", health.pending()
+                    "reader", targets.toString(),
+                    "readerConnected", allConnected,
+                    "inventoryRunning", anyRunning,
+                    "activeSessionId", firstActiveSession,
+                    "uniqueEpcs", totalUnique,
+                    "sentEpcs", totalSent,
+                    "pendingEpcs", totalPending,
+                    "readers", Json.array(readerEntries)
             ));
         } finally {
             exchange.close();

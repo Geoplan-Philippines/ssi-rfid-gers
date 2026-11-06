@@ -15,10 +15,16 @@ import java.time.Duration;
 public final class ReaderCommandClient {
 
     private final AgentConfig config;
+    private final String readerId;
     private final HttpClient httpClient;
 
     public ReaderCommandClient(AgentConfig config) {
+        this(config, config.readerId);
+    }
+
+    public ReaderCommandClient(AgentConfig config, String readerId) {
         this.config = config;
+        this.readerId = readerId;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofMillis(config.middlewareTimeoutMs))
                 .followRedirects(HttpClient.Redirect.NORMAL)
@@ -27,7 +33,7 @@ public final class ReaderCommandClient {
 
     public ReaderCommand poll(ScanCoordinator.Health health) throws IOException, InterruptedException {
         String body = Json.object(
-                "readerId", config.readerId,
+                "readerId", readerId,
                 "readerConnected", health.readerConnected(),
                 "inventoryRunning", health.inventoryRunning(),
                 "activeSessionId", health.activeSessionId()
@@ -68,7 +74,7 @@ public final class ReaderCommandClient {
             ScanCoordinator.Health health
     ) throws IOException, InterruptedException {
         String body = Json.object(
-                "readerId", config.readerId,
+                "readerId", readerId,
                 "status", succeeded ? "SUCCEEDED" : "FAILED",
                 "readerConnected", health.readerConnected(),
                 "inventoryRunning", health.inventoryRunning(),

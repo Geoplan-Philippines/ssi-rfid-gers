@@ -127,6 +127,87 @@ function Get-Snippet {
     return $flattened.Substring(0, 200) + "..."
 }
 
+function Split-SettingList {
+    param([string]$Raw, [string]$Pattern = '[,;]')
+
+    if ([string]::IsNullOrWhiteSpace($Raw)) {
+        return @()
+    }
+    return @(
+        $Raw -split $Pattern |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+}
+
+function Get-ConfiguredReaders {
+    param([hashtable]$FileValues)
+
+    $hosts = Split-SettingList (Get-Setting -FileValues $FileValues -Name "READER_HOST")
+    $ids = Split-SettingList (Get-Setting -FileValues $FileValues -Name "READER_ID")
+    $ports = Split-SettingList (Get-Setting -FileValues $FileValues -Name "READER_PORT")
+    $names = Split-SettingList (Get-Setting -FileValues $FileValues -Name "READER_NAME")
+
+    $indices = [System.Collections.Generic.SortedSet[int]]::new()
+    foreach ($key in $FileValues.Keys) {
+        if ($key -match '^READER_(\d+)_(HOST|PORT|NAME|MODE|ANTENNAS|ID)$' -and
+            -not [string]::IsNullOrWhiteSpace($FileValues[$key])) {
+            [void]$indices.Add([int]$Matches[1])
+        }
+    }
+
+    $unnumberedCount = [Math]::Max($hosts.Count, $ids.Count)
+    for ($i = 1; $i -le $unnumberedCount; $i++) {
+        [void]$indices.Add($i)
+    }
+    if ($indices.Count -eq 0) {
+        [void]$indices.Add(1)
+    }
+
+    $readers = @()
+    $pos = 0
+    foreach ($idx in $indices) {
+        $prefix = "READER_${idx}_"
+
+        $rHost = Get-Setting -FileValues $FileValues -Name "${prefix}HOST"
+        if ([string]::IsNullOrWhiteSpace($rHost)) {
+            if ($pos -lt $hosts.Count) { $rHost = $hosts[$pos] }
+            elseif ($hosts.Count -eq 1) { $rHost = $hosts[0] }
+            else { $rHost = "192.168.1.100" }
+        }
+
+        $rPortText = Get-Setting -FileValues $FileValues -Name "${prefix}PORT"
+        if ([string]::IsNullOrWhiteSpace($rPortText)) {
+            if ($pos -lt $ports.Count) { $rPortText = $ports[$pos] }
+            elseif ($ports.Count -eq 1) { $rPortText = $ports[0] }
+            else { $rPortText = "9090" }
+        }
+
+        $rName = Get-Setting -FileValues $FileValues -Name "${prefix}NAME"
+        if ([string]::IsNullOrWhiteSpace($rName)) {
+            if ($pos -lt $names.Count) { $rName = $names[$pos] }
+            else { $rName = "Device$idx" }
+        }
+
+        $rId = Get-Setting -FileValues $FileValues -Name "${prefix}ID"
+        if ([string]::IsNullOrWhiteSpace($rId) -and $pos -lt $ids.Count) {
+            $rId = $ids[$pos]
+        }
+
+        $readers += [pscustomobject]@{
+            Index    = $idx
+            Name     = $rName
+            Host     = $rHost
+            PortText = $rPortText
+            Port     = 0
+            Id       = $rId
+        }
+        $pos++
+    }
+
+    return $readers
+}
+
 $root = Get-RepoRoot
 $agentEnvFile = Join-Path $root "agent.env"
 $values = Read-AgentEnvironment -File $agentEnvFile
@@ -136,17 +217,25 @@ if (-not (Test-Path $agentEnvFile)) {
     $failures += "Missing $agentEnvFile"
 }
 
-$readerHost = Get-Setting -FileValues $values -Name "READER_HOST" -Default "192.168.1.100"
-$readerPortText = Get-Setting -FileValues $values -Name "READER_PORT" -Default "9090"
+$readers = Get-ConfiguredReaders -FileValues $values
 $middlewareBaseUrl = (Get-Setting -FileValues $values -Name "MIDDLEWARE_BASE_URL").TrimEnd('/')
 $middlewareApiKey = Get-Setting -FileValues $values -Name "MIDDLEWARE_API_KEY"
-$readerId = Get-Setting -FileValues $values -Name "READER_ID"
 $controlPortText = Get-Setting -FileValues $values -Name "AGENT_CONTROL_PORT" -Default "8443"
 
-$readerPort = 0
-if (-not [int]::TryParse($readerPortText, [ref]$readerPort) -or $readerPort -lt 1 -or $readerPort -gt 65535) {
-    $failures += "READER_PORT is invalid: '$readerPortText'"
+foreach ($reader in $readers) {
+    $parsedPort = 0
+    if (-not [int]::TryParse($reader.PortText, [ref]$parsedPort) -or $parsedPort -lt 1 -or $parsedPort -gt 65535) {
+        $failures += "READER_PORT for $($reader.Name) is invalid: '$($reader.PortText)'"
+    } else {
+        $reader.Port = $parsedPort
+    }
+
+    $parsedReaderId = [Guid]::Empty
+    if (-not [Guid]::TryParse($reader.Id, [ref]$parsedReaderId)) {
+        $failures += "READER_ID for $($reader.Name) must be the deployed middleware RFID reader UUID: '$($reader.Id)'"
+    }
 }
+
 $controlPort = 0
 if (-not [int]::TryParse($controlPortText, [ref]$controlPort) -or $controlPort -lt 1 -or $controlPort -gt 65535) {
     $failures += "AGENT_CONTROL_PORT is invalid: '$controlPortText'"
@@ -161,10 +250,6 @@ if ([string]::IsNullOrWhiteSpace($middlewareBaseUrl) -or
 if ([string]::IsNullOrWhiteSpace($middlewareApiKey) -or $middlewareApiKey -eq "replace-me") {
     $failures += "MIDDLEWARE_API_KEY is missing or still uses the example value"
 }
-$parsedReaderId = [Guid]::Empty
-if (-not [Guid]::TryParse($readerId, [ref]$parsedReaderId)) {
-    $failures += "READER_ID must be the deployed middleware RFID reader UUID: '$readerId'"
-}
 
 if ($failures.Count -gt 0) {
     foreach ($failure in $failures) {
@@ -173,20 +258,20 @@ if ($failures.Count -gt 0) {
     throw "Deployment verification failed because agent.env is incomplete."
 }
 
-Write-Host "Checking SSI RFID reader-agent deployment..." -ForegroundColor Cyan
+Write-Host "Checking SSI RFID reader-agent deployment ($($readers.Count) reader(s))..." -ForegroundColor Cyan
 Write-Host "PASS: agent.env contains the required reader and middleware settings." -ForegroundColor Green
 
-try {
-    $readerTcpReachable = Test-NetConnection -ComputerName $readerHost -Port $readerPort -InformationLevel Quiet -WarningAction SilentlyContinue
-} catch {
-    $readerTcpReachable = $false
-}
-if ($readerTcpReachable) {
-    Write-Host "PASS: R400 TCP port is reachable at $readerHost`:$readerPort." -ForegroundColor Green
-} else {
-    # Some R400 firmware accepts only the agent's existing TCP client. The
-    # authoritative check below is the running agent's readerConnected state.
-    Write-Host "WARN: A second TCP probe to $readerHost`:$readerPort was not accepted; checking agent health instead." -ForegroundColor Yellow
+foreach ($reader in $readers) {
+    try {
+        $readerTcpReachable = Test-NetConnection -ComputerName $reader.Host -Port $reader.Port -InformationLevel Quiet -WarningAction SilentlyContinue
+    } catch {
+        $readerTcpReachable = $false
+    }
+    if ($readerTcpReachable) {
+        Write-Host "PASS: [$($reader.Name)] R400 TCP port is reachable at $($reader.Host):$($reader.Port)." -ForegroundColor Green
+    } else {
+        Write-Host "WARN: [$($reader.Name)] A second TCP probe to $($reader.Host):$($reader.Port) was not accepted; checking agent health instead." -ForegroundColor Yellow
+    }
 }
 
 $healthUrl = $middlewareBaseUrl + "/api/v1/health"
@@ -246,59 +331,58 @@ if (-not $localHealth) {
     }
 }
 
-# This safe GET validates the API key and reader UUID. Waiting for agentOnline
-# also proves that the deployed /reader-agent/commands/poll endpoint accepted a
-# heartbeat; unlike posting to /poll directly, it cannot claim a real command.
-$readerUrl = $middlewareBaseUrl + "/api/v1/rfid-readers/" + $readerId
-$cloudReader = $null
-$cloudStatus = 0
-$cloudBody = ""
-$cloudDeadline = (Get-Date).AddSeconds($StartupTimeoutSeconds)
-do {
-    try {
-        $readerResponse = Invoke-Get -Url $readerUrl -ApiKey $middlewareApiKey
-        $cloudStatus = $readerResponse.StatusCode
-        $cloudBody = $readerResponse.Body
-        if ($cloudStatus -ge 200 -and $cloudStatus -lt 300) {
-            $cloudReader = Get-ResponseData -Body $cloudBody
-            if ($cloudReader -and $cloudReader.agentOnline -eq $true -and $cloudReader.readerConnected -eq $true) {
+foreach ($reader in $readers) {
+    $readerUrl = $middlewareBaseUrl + "/api/v1/rfid-readers/" + $reader.Id
+    $cloudReader = $null
+    $cloudStatus = 0
+    $cloudBody = ""
+    $cloudDeadline = (Get-Date).AddSeconds($StartupTimeoutSeconds)
+    do {
+        try {
+            $readerResponse = Invoke-Get -Url $readerUrl -ApiKey $middlewareApiKey
+            $cloudStatus = $readerResponse.StatusCode
+            $cloudBody = $readerResponse.Body
+            if ($cloudStatus -ge 200 -and $cloudStatus -lt 300) {
+                $cloudReader = Get-ResponseData -Body $cloudBody
+                if ($cloudReader -and $cloudReader.agentOnline -eq $true -and $cloudReader.readerConnected -eq $true) {
+                    break
+                }
+            } else {
                 break
             }
-        } else {
+        } catch {
+            $cloudBody = $_.Exception.Message
             break
         }
-    } catch {
-        $cloudBody = $_.Exception.Message
-        break
-    }
-    Start-Sleep -Seconds 2
-} while ((Get-Date) -lt $cloudDeadline)
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $cloudDeadline)
 
-if ($cloudStatus -lt 200 -or $cloudStatus -ge 300) {
-    $failures += "Middleware rejected the API key or READER_ID (HTTP $cloudStatus)"
-    Write-Host "FAIL: Middleware reader lookup returned HTTP $cloudStatus`: $(Get-Snippet $cloudBody)" -ForegroundColor Red
-} elseif (-not $cloudReader) {
-    $failures += "Middleware returned an invalid RFID reader response"
-    Write-Host "FAIL: Middleware returned an invalid RFID reader response." -ForegroundColor Red
-} else {
-    Write-Host "PASS: MIDDLEWARE_API_KEY and READER_ID are accepted by the deployed middleware." -ForegroundColor Green
-    if ($cloudReader.status -ne "ACTIVE") {
-        $failures += "Middleware reader status is $($cloudReader.status), not ACTIVE"
-        Write-Host "FAIL: Middleware reader status is $($cloudReader.status), not ACTIVE." -ForegroundColor Red
+    if ($cloudStatus -lt 200 -or $cloudStatus -ge 300) {
+        $failures += "[$($reader.Name)] Middleware rejected the API key or READER_ID $($reader.Id) (HTTP $cloudStatus)"
+        Write-Host "FAIL: [$($reader.Name)] Middleware reader lookup returned HTTP $cloudStatus`: $(Get-Snippet $cloudBody)" -ForegroundColor Red
+    } elseif (-not $cloudReader) {
+        $failures += "[$($reader.Name)] Middleware returned an invalid RFID reader response"
+        Write-Host "FAIL: [$($reader.Name)] Middleware returned an invalid RFID reader response." -ForegroundColor Red
     } else {
-        Write-Host "PASS: Middleware reader is ACTIVE." -ForegroundColor Green
-    }
-    if ($cloudReader.agentOnline -eq $true) {
-        Write-Host "PASS: Middleware received the agent heartbeat (agentOnline=true)." -ForegroundColor Green
-    } else {
-        $failures += "Middleware did not receive an agent heartbeat within $StartupTimeoutSeconds seconds"
-        Write-Host "FAIL: Middleware still reports agentOnline=false." -ForegroundColor Red
-    }
-    if ($cloudReader.readerConnected -eq $true) {
-        Write-Host "PASS: Middleware reports readerConnected=true." -ForegroundColor Green
-    } else {
-        $failures += "Middleware reports readerConnected=false"
-        Write-Host "FAIL: Middleware reports readerConnected=false." -ForegroundColor Red
+        Write-Host "PASS: [$($reader.Name)] MIDDLEWARE_API_KEY and READER_ID ($($reader.Id)) are accepted by the deployed middleware." -ForegroundColor Green
+        if ($cloudReader.status -ne "ACTIVE") {
+            $failures += "[$($reader.Name)] Middleware reader status is $($cloudReader.status), not ACTIVE"
+            Write-Host "FAIL: [$($reader.Name)] Middleware reader status is $($cloudReader.status), not ACTIVE." -ForegroundColor Red
+        } else {
+            Write-Host "PASS: [$($reader.Name)] Middleware reader is ACTIVE." -ForegroundColor Green
+        }
+        if ($cloudReader.agentOnline -eq $true) {
+            Write-Host "PASS: [$($reader.Name)] Middleware received the agent heartbeat (agentOnline=true)." -ForegroundColor Green
+        } else {
+            $failures += "[$($reader.Name)] Middleware did not receive an agent heartbeat within $StartupTimeoutSeconds seconds"
+            Write-Host "FAIL: [$($reader.Name)] Middleware still reports agentOnline=false." -ForegroundColor Red
+        }
+        if ($cloudReader.readerConnected -eq $true) {
+            Write-Host "PASS: [$($reader.Name)] Middleware reports readerConnected=true." -ForegroundColor Green
+        } else {
+            $failures += "[$($reader.Name)] Middleware reports readerConnected=false"
+            Write-Host "FAIL: [$($reader.Name)] Middleware reports readerConnected=false." -ForegroundColor Red
+        }
     }
 }
 

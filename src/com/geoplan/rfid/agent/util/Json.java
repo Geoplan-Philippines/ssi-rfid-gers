@@ -57,10 +57,30 @@ public final class Json {
         return body.toString();
     }
 
+    public record Raw(String json) {
+        @Override
+        public String toString() {
+            return json;
+        }
+    }
+
+    public static Raw array(Collection<String> rawJsonElements) {
+        StringBuilder body = new StringBuilder("[");
+        boolean first = true;
+        for (String element : rawJsonElements) {
+            if (!first) {
+                body.append(',');
+            }
+            body.append(element);
+            first = false;
+        }
+        return new Raw(body.append(']').toString());
+    }
+
     /**
      * Builds a flat object from alternating key and value arguments. A null
-     * value is written as JSON null, a Number or Boolean is written bare, and
-     * anything else is written as a quoted string.
+     * value is written as JSON null, a Number, Boolean or Raw is written bare,
+     * and anything else is written as a quoted string.
      */
     public static String object(Object... keysAndValues) {
         if (keysAndValues.length % 2 != 0) {
@@ -80,7 +100,7 @@ public final class Json {
 
             if (value == null) {
                 body.append("null");
-            } else if (value instanceof Number || value instanceof Boolean) {
+            } else if (value instanceof Number || value instanceof Boolean || value instanceof Raw) {
                 body.append(value);
             } else {
                 body.append('"').append(escape(String.valueOf(value))).append('"');

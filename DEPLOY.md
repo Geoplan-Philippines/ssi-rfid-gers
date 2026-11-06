@@ -149,13 +149,28 @@ The vendor libraries must reside in the [`libs/`](libs/) directory:
 Create or edit `agent.env` in the root of `ssi-rfid-gers`:
 
 ```properties
-# --- Reader Hardware Settings ---
+# --- Reader Hardware Settings (Controller 1) ---
 # Factory default is 192.168.1.100:9090. On warehouse/office LAN, assign a static IP on the subnet:
 READER_HOST=172.16.210.200
 READER_PORT=9090
 READER_NAME=Device1
 READER_MODE=hardware
-READER_ANTENNAS=1,2
+READER_ANTENNAS=1,2,3
+
+# --- Additional Controller(s) (Optional) ---
+# Option A: Numbered blocks per controller (READER_2_*, READER_3_*, ...)
+# READER_2_HOST=172.16.210.201
+# READER_2_PORT=9090
+# READER_2_NAME=Device2
+# READER_2_MODE=hardware
+# READER_2_ANTENNAS=1,2,3
+# READER_2_ID=replace-with-second-rfid-reader-uuid
+#
+# Option B: Comma-separated lists on the base keys (use ';' to separate per-reader antenna lists)
+# READER_HOST=172.16.210.200,172.16.210.201
+# READER_NAME=Device1,Device2
+# READER_ANTENNAS=1,2,3;1,2
+# READER_ID=uuid-controller-1,uuid-controller-2
 
 # --- Local diagnostics ---
 AGENT_BIND_ADDRESS=127.0.0.1
@@ -164,7 +179,7 @@ AGENT_CONTROL_PORT=8443
 # --- Deployed middleware and outbound command polling ---
 MIDDLEWARE_BASE_URL=https://api-stg-sling.rgoc.com.ph
 MIDDLEWARE_API_KEY=replace-with-an-active-integration-api-key
-# Must be the UUID of this ACTIVE row in the deployed middleware's RFID Readers screen.
+# Must be the UUID(s) of the ACTIVE row(s) in the deployed middleware's RFID Readers screen.
 READER_ID=replace-with-rfid-reader-uuid
 
 # --- Batching & Flush Settings ---

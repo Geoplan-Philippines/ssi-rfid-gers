@@ -10,12 +10,18 @@ import com.geoplan.rfid.agent.reader.TagReader;
 import com.geoplan.rfid.agent.scan.ScanCoordinator;
 import com.geoplan.rfid.agent.util.Log;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
 /**
  * SSI RMK reader agent.
  *
- * The middleware owns warehouse documents. This process owns one iData R400: it
- * waits for POST /scan/start, runs inventory, pushes unique EPCs to
- * /epc-scan-processing/sessions/{sessionId}/reads, and stops on POST /scan/stop.
+ * The middleware owns warehouse documents. This process drives one or more
+ * iData R400 controllers: each controller polls commands for its READER_ID,
+ * runs continuous inventory, pushes unique EPCs to
+ * /epc-scan-processing/sessions/{sessionId}/reads, and stops on STOP.
  */
 public final class AgentMain {
 
@@ -29,22 +35,49 @@ public final class AgentMain {
         Log.info("SSI RMK reader agent starting");
         config.logSummary();
 
-        TagReader reader = config.simulated
-                ? new SimulatedTagReader(config)
-                : new R400TagReader(config);
-
         MiddlewareClient middleware = new MiddlewareClient(config);
-        ScanCoordinator coordinator = new ScanCoordinator(config, reader, middleware);
-        ControlServer controlServer = new ControlServer(config, coordinator);
-        CommandPoller commandPoller = new CommandPoller(config, coordinator);
+
+        List<TagReader> readers = new ArrayList<>();
+        List<ScanCoordinator> coordinators = new ArrayList<>();
+        List<CommandPoller> pollers = new ArrayList<>();
+        Map<String, ScanCoordinator> coordinatorsByEndpoint = new LinkedHashMap<>();
+
+        for (AgentConfig.ReaderConfig rc : config.readers) {
+            String endpointKey = rc.endpointKey();
+            ScanCoordinator coordinator = coordinatorsByEndpoint.get(endpointKey);
+
+            if (coordinator == null) {
+                TagReader reader = rc.simulated()
+                        ? new SimulatedTagReader(rc)
+                        : new R400TagReader(rc);
+                coordinator = new ScanCoordinator(config, rc, reader, middleware);
+                readers.add(reader);
+                coordinators.add(coordinator);
+                coordinatorsByEndpoint.put(endpointKey, coordinator);
+            } else {
+                coordinator.registerReaderId(rc.readerId());
+                Log.info("Reader config " + rc.readerName() + " shares hardware endpoint "
+                        + endpointKey + " with " + coordinator.readerConfig().readerName());
+            }
+
+            pollers.add(new CommandPoller(config, rc, coordinator));
+        }
+
+        ControlServer controlServer = new ControlServer(config, coordinators);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             Log.info("Shutting down");
 
-            commandPoller.stop();
+            for (CommandPoller poller : pollers) {
+                poller.stop();
+            }
             controlServer.stop();
-            coordinator.stopAll();
-            reader.close();
+            for (ScanCoordinator coordinator : coordinators) {
+                coordinator.stopAll();
+            }
+            for (TagReader reader : readers) {
+                reader.close();
+            }
         }, "agent-shutdown"));
 
         try {
@@ -55,19 +88,26 @@ public final class AgentMain {
             return;
         }
 
-        coordinator.startBackgroundWork();
+        for (ScanCoordinator coordinator : coordinators) {
+            coordinator.startBackgroundWork();
+        }
 
         /*
          * Connecting here is a convenience: the desk sees a reader problem at
          * boot instead of at the first Start. A failure is not fatal because
          * /scan/start reconnects anyway.
          */
-        if (!reader.connect()) {
-            Log.warn("Reader " + reader.describe() + " is not reachable yet. A START command will retry.");
+        for (TagReader reader : readers) {
+            if (!reader.connect()) {
+                Log.warn("Reader " + reader.describe() + " is not reachable yet. A START command will retry.");
+            }
         }
 
-        commandPoller.start();
-        Log.info("Ready. Waiting for outbound-polled reader commands.");
+        for (CommandPoller poller : pollers) {
+            poller.start();
+        }
+        Log.info("Ready. Waiting for outbound-polled reader commands across "
+                + coordinators.size() + " controller(s).");
 
         try {
             Thread.currentThread().join();

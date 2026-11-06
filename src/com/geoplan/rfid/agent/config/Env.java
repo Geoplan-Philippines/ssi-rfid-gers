@@ -89,6 +89,41 @@ public final class Env {
         return string(key, "");
     }
 
+    public static boolean isSet(String key) {
+        return !optional(key).isEmpty();
+    }
+
+    /**
+     * Returns sorted 1-based indices for any READER_<N>_* keys present in
+     * system properties, environment variables, or agent.env.
+     */
+    public static java.util.List<Integer> readerIndices() {
+        java.util.Set<Integer> indices = new java.util.TreeSet<>();
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
+                "^READER_(\\d+)_(HOST|PORT|NAME|MODE|ANTENNAS|ID|TAG_FILTERING_TIME_MS)$"
+        );
+
+        java.util.Set<String> allKeys = new java.util.HashSet<>();
+        allKeys.addAll(FILE_VALUES.keySet());
+        allKeys.addAll(System.getenv().keySet());
+        allKeys.addAll(System.getProperties().stringPropertyNames());
+
+        for (String key : allKeys) {
+            java.util.regex.Matcher matcher = pattern.matcher(key);
+            if (matcher.matches() && isSet(key)) {
+                try {
+                    int index = Integer.parseInt(matcher.group(1));
+                    if (index >= 1) {
+                        indices.add(index);
+                    }
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
+
+        return java.util.List.copyOf(indices);
+    }
+
     public static int integer(String key, int defaultValue, int minimum, int maximum) {
         String value = string(key, Integer.toString(defaultValue));
 

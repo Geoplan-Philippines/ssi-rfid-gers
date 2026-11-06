@@ -64,26 +64,72 @@ public final class ScanCoordinator implements EpcListener {
     private static final long DRAIN_GRACE_MS = 30_000;
 
     private final AgentConfig config;
+    private final AgentConfig.ReaderConfig readerConfig;
     private final TagReader reader;
     private final MiddlewareClient middleware;
+    private final java.util.Set<String> readerIds = ConcurrentHashMap.newKeySet();
 
     private final Object lock = new Object();
     private final Map<ScanSession, Long> draining = new ConcurrentHashMap<>();
 
-    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2, task -> {
-        Thread thread = new Thread(task, "scan-worker");
-        thread.setDaemon(true);
-        return thread;
-    });
+    private final ScheduledExecutorService scheduler;
 
     private volatile ScanSession active;
 
     public ScanCoordinator(AgentConfig config, TagReader reader, MiddlewareClient middleware) {
+        this(config, config.primaryReader(), reader, middleware);
+    }
+
+    public ScanCoordinator(
+            AgentConfig config,
+            AgentConfig.ReaderConfig readerConfig,
+            TagReader reader,
+            MiddlewareClient middleware
+    ) {
         this.config = config;
+        this.readerConfig = readerConfig;
         this.reader = reader;
         this.middleware = middleware;
+        if (!readerConfig.readerId().isEmpty()) {
+            this.readerIds.add(readerConfig.readerId());
+        }
+
+        this.scheduler = Executors.newScheduledThreadPool(2, task -> {
+            Thread thread = new Thread(task, "scan-worker-" + readerConfig.readerName());
+            thread.setDaemon(true);
+            return thread;
+        });
 
         reader.setListener(this);
+    }
+
+    public AgentConfig.ReaderConfig readerConfig() {
+        return readerConfig;
+    }
+
+    public void registerReaderId(String id) {
+        if (id != null && !id.isEmpty()) {
+            readerIds.add(id);
+        }
+    }
+
+    public boolean matchesReaderId(String id) {
+        return id != null && !id.isEmpty() && readerIds.contains(id);
+    }
+
+    public boolean matchesReaderName(String name) {
+        return name != null && readerConfig.readerName().equalsIgnoreCase(name.trim());
+    }
+
+    public boolean hasSession(String sessionId) {
+        if (sessionId == null) {
+            return false;
+        }
+        ScanSession current = active;
+        if (current != null && current.sessionId().equals(sessionId)) {
+            return true;
+        }
+        return findDrainingSession(sessionId) != null;
     }
 
     public void startBackgroundWork() {
@@ -96,8 +142,8 @@ public final class ScanCoordinator implements EpcListener {
 
         scheduler.scheduleWithFixedDelay(
                 this::watchdogTick,
-                config.readerWatchdogIntervalMs,
-                config.readerWatchdogIntervalMs,
+                readerConfig.readerWatchdogIntervalMs(),
+                readerConfig.readerWatchdogIntervalMs(),
                 TimeUnit.MILLISECONDS
         );
     }

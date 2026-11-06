@@ -31,7 +31,7 @@ public final class R400TagReader implements TagReader {
 
     private static final int SEND_TIMEOUT_MS = 2000;
 
-    private final AgentConfig config;
+    private final AgentConfig.ReaderConfig readerConfig;
     private final Object lock = new Object();
     private final ConcurrentHashMap<String, Long> lastLoggedTime = new ConcurrentHashMap<>();
 
@@ -41,7 +41,11 @@ public final class R400TagReader implements TagReader {
     private Reader reader;
 
     public R400TagReader(AgentConfig config) {
-        this.config = config;
+        this(config.primaryReader());
+    }
+
+    public R400TagReader(AgentConfig.ReaderConfig readerConfig) {
+        this.readerConfig = readerConfig;
     }
 
     @Override
@@ -59,11 +63,12 @@ public final class R400TagReader implements TagReader {
             disconnectQuietly();
 
             try {
-                Log.info("Connecting to reader " + config.readerHost + ":" + config.readerPort + " ...");
+                Log.info("Connecting to reader " + readerConfig.readerName()
+                        + " (" + readerConfig.readerHost() + ":" + readerConfig.readerPort() + ") ...");
 
                 Reader candidate = new Reader(
-                        config.readerName,
-                        new TcpClientPort(config.readerHost, config.readerPort)
+                        readerConfig.readerName(),
+                        new TcpClientPort(readerConfig.readerHost(), readerConfig.readerPort())
                 );
 
                 ConnectResponse response = candidate.Connect();
@@ -71,7 +76,7 @@ public final class R400TagReader implements TagReader {
                 if (response == null || !response.IsSucessed) {
                     ErrInfo error = response == null ? null : response.ErrorInfo;
 
-                    Log.error("Reader connection failed"
+                    Log.error("Reader connection failed (" + readerConfig.readerName() + ")"
                             + (error != null ? " | code=" + error.getErrCode() + " | msg=" + error.getErrMsg() : ""));
                     return false;
                 }
@@ -81,7 +86,7 @@ public final class R400TagReader implements TagReader {
                 reader = candidate;
                 inventoryRunning = false;
 
-                Log.info("Reader connected"
+                Log.info("Reader connected (" + readerConfig.readerName() + ")"
                         + " | model=" + safe(candidate.getModelNumber())
                         + " | firmware=" + safe(candidate.getSoftwareVersion()));
 
@@ -89,7 +94,7 @@ public final class R400TagReader implements TagReader {
 
                 return true;
             } catch (Exception e) {
-                Log.error("Reader connection threw", e);
+                Log.error("Reader connection threw (" + readerConfig.readerName() + ")", e);
                 reader = null;
                 return false;
             }
@@ -115,7 +120,7 @@ public final class R400TagReader implements TagReader {
 
                 /* 0 means no time limit. Inventory runs until MsgPowerOff. */
                 parameter.TotalReadTime = 0;
-                parameter.TagFilteringTime = config.readerTagFilteringTimeMs;
+                parameter.TagFilteringTime = readerConfig.readerTagFilteringTimeMs();
 
                 parameter.IsReturnEPC = true;
                 parameter.IsReturnTID = false;
@@ -125,18 +130,18 @@ public final class R400TagReader implements TagReader {
                 if (!reader.Send(inventory)) {
                     ErrInfo error = inventory.getErrorInfo();
 
-                    Log.error("Failed to start inventory"
+                    Log.error("Failed to start inventory (" + readerConfig.readerName() + ")"
                             + " | status=" + inventory.getStatus()
                             + (error != null ? " | code=" + error.getErrCode() + " | msg=" + error.getErrMsg() : ""));
                     return false;
                 }
 
                 inventoryRunning = true;
-                Log.info("Inventory started");
+                Log.info("Inventory started (" + readerConfig.readerName() + ")");
 
                 return true;
             } catch (Exception e) {
-                Log.error("Failed to start inventory", e);
+                Log.error("Failed to start inventory (" + readerConfig.readerName() + ")", e);
                 inventoryRunning = false;
                 return false;
             }
@@ -157,9 +162,9 @@ public final class R400TagReader implements TagReader {
                     reader.Send(new MsgPowerOff(), SEND_TIMEOUT_MS);
                 }
 
-                Log.info("Inventory stopped");
+                Log.info("Inventory stopped (" + readerConfig.readerName() + ")");
             } catch (Exception e) {
-                Log.warn("Failed to stop inventory cleanly", e);
+                Log.warn("Failed to stop inventory cleanly (" + readerConfig.readerName() + ")", e);
             }
         }
     }
@@ -186,7 +191,7 @@ public final class R400TagReader implements TagReader {
 
     @Override
     public String describe() {
-        return config.readerHost + ":" + config.readerPort;
+        return readerConfig.readerHost() + ":" + readerConfig.readerPort();
     }
 
     /**
@@ -217,7 +222,8 @@ public final class R400TagReader implements TagReader {
             long now = System.currentTimeMillis();
             Long last = lastLoggedTime.put(key, now);
             if (last == null || now - last > 1500) {
-                Log.info(String.format("📡 [Antenna %d] Read tag: %s (RSSI: %.1f dBm)", antenna, epc, tagData.GetRSSI()));
+                Log.info(String.format("📡 [%s | Antenna %d] Read tag: %s (RSSI: %.1f dBm)",
+                        readerConfig.readerName(), antenna, epc, tagData.GetRSSI()));
             }
 
             EpcListener target = listener;
@@ -226,7 +232,7 @@ public final class R400TagReader implements TagReader {
                 target.onEpc(epc);
             }
         } catch (Exception e) {
-            Log.warn("Tag callback failed", e);
+            Log.warn("Tag callback failed (" + readerConfig.readerName() + ")", e);
         }
     }
 
@@ -252,7 +258,7 @@ public final class R400TagReader implements TagReader {
     private void applyAntennaConfig(Reader candidate) {
         try {
             boolean[] enabled = new boolean[5];
-            for (String part : config.readerAntennas.split(",")) {
+            for (String part : readerConfig.readerAntennas().split(",")) {
                 String trimmed = part.trim();
                 if (!trimmed.isEmpty()) {
                     int p = Integer.parseInt(trimmed);
@@ -272,12 +278,12 @@ public final class R400TagReader implements TagReader {
 
             MsgAntennaConfig msg = new MsgAntennaConfig(antennas);
             if (candidate.Send(msg)) {
-                Log.info("Antennas configured | active ports=" + config.readerAntennas);
+                Log.info("Antennas configured (" + readerConfig.readerName() + ") | active ports=" + readerConfig.readerAntennas());
             } else {
-                Log.warn("Failed to apply antenna configuration to reader");
+                Log.warn("Failed to apply antenna configuration to reader " + readerConfig.readerName());
             }
         } catch (Exception e) {
-            Log.warn("Failed setting antenna configuration", e);
+            Log.warn("Failed setting antenna configuration (" + readerConfig.readerName() + ")", e);
         }
     }
 

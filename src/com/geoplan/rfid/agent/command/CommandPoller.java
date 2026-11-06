@@ -22,6 +22,8 @@ public final class CommandPoller {
     }
 
     private final AgentConfig config;
+    private final String readerId;
+    private final String readerName;
     private final ScanCoordinator coordinator;
     private final ReaderCommandClient client;
 
@@ -29,14 +31,24 @@ public final class CommandPoller {
     private Thread thread;
 
     public CommandPoller(AgentConfig config, ScanCoordinator coordinator) {
+        this(config, config.primaryReader(), coordinator);
+    }
+
+    public CommandPoller(
+            AgentConfig config,
+            AgentConfig.ReaderConfig readerConfig,
+            ScanCoordinator coordinator
+    ) {
         this.config = config;
+        this.readerId = readerConfig.readerId();
+        this.readerName = readerConfig.readerName();
         this.coordinator = coordinator;
-        this.client = new ReaderCommandClient(config);
+        this.client = new ReaderCommandClient(config, readerConfig.readerId());
     }
 
     public void start() {
-        if (config.readerId.isEmpty()) {
-            Log.warn("Command poller not started because READER_ID is missing");
+        if (readerId.isEmpty()) {
+            Log.warn("Command poller not started for " + readerName + " because READER_ID is missing");
             return;
         }
         if (running) {
@@ -44,10 +56,10 @@ public final class CommandPoller {
         }
 
         running = true;
-        thread = new Thread(this::runLoop, "command-poller");
+        thread = new Thread(this::runLoop, "command-poller-" + readerName);
         thread.setDaemon(true);
         thread.start();
-        Log.info("Outbound command polling started for reader " + config.readerId);
+        Log.info("Outbound command polling started for reader " + readerName + " (" + readerId + ")");
     }
 
     public void stop() {
@@ -65,7 +77,7 @@ public final class CommandPoller {
                     continue;
                 }
 
-                Log.info("Claimed " + command.type() + " command " + command.commandId()
+                Log.info("[" + readerName + "] Claimed " + command.type() + " command " + command.commandId()
                         + " for session " + command.sessionId());
                 Outcome outcome = execute(command);
                 client.acknowledge(
@@ -75,9 +87,9 @@ public final class CommandPoller {
                         coordinator.health()
                 );
                 if (outcome.succeeded()) {
-                    Log.info("Completed " + command.type() + " command " + command.commandId());
+                    Log.info("[" + readerName + "] Completed " + command.type() + " command " + command.commandId());
                 } else {
-                    Log.warn("Failed " + command.type() + " command " + command.commandId()
+                    Log.warn("[" + readerName + "] Failed " + command.type() + " command " + command.commandId()
                             + ": " + outcome.error());
                 }
             } catch (InterruptedException error) {
@@ -87,7 +99,7 @@ public final class CommandPoller {
                 if (!running) {
                     return;
                 }
-                Log.warn("Command polling failed: " + error.getClass().getSimpleName()
+                Log.warn("[" + readerName + "] Command polling failed: " + error.getClass().getSimpleName()
                         + " " + error.getMessage());
                 sleepBeforeRetry();
             }

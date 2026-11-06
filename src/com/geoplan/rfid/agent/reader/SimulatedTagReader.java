@@ -16,19 +16,24 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class SimulatedTagReader implements TagReader {
 
-    private final AgentConfig config;
+    private final AgentConfig.ReaderConfig readerConfig;
     private final AtomicInteger counter = new AtomicInteger();
-    private final ScheduledExecutorService ticker = Executors.newSingleThreadScheduledExecutor(task -> {
-        Thread thread = new Thread(task, "simulated-reader");
-        thread.setDaemon(true);
-        return thread;
-    });
+    private final ScheduledExecutorService ticker;
 
     private volatile EpcListener listener;
     private volatile ScheduledFuture<?> tick;
 
     public SimulatedTagReader(AgentConfig config) {
-        this.config = config;
+        this(config.primaryReader());
+    }
+
+    public SimulatedTagReader(AgentConfig.ReaderConfig readerConfig) {
+        this.readerConfig = readerConfig;
+        this.ticker = Executors.newSingleThreadScheduledExecutor(task -> {
+            Thread thread = new Thread(task, "simulated-reader-" + readerConfig.readerName());
+            thread.setDaemon(true);
+            return thread;
+        });
     }
 
     @Override
@@ -50,12 +55,13 @@ public final class SimulatedTagReader implements TagReader {
         tick = ticker.scheduleWithFixedDelay(
                 this::emit,
                 0,
-                config.simulatedIntervalMs,
+                readerConfig.simulatedIntervalMs(),
                 TimeUnit.MILLISECONDS
         );
 
-        Log.info("Simulated inventory started (" + config.simulatedTagCount + " tags every "
-                + config.simulatedIntervalMs + "ms)");
+        Log.info("Simulated inventory started (" + readerConfig.readerName() + ": "
+                + readerConfig.simulatedTagCount() + " tags every "
+                + readerConfig.simulatedIntervalMs() + "ms)");
 
         return true;
     }
@@ -69,7 +75,7 @@ public final class SimulatedTagReader implements TagReader {
         tick.cancel(false);
         tick = null;
 
-        Log.info("Simulated inventory stopped");
+        Log.info("Simulated inventory stopped (" + readerConfig.readerName() + ")");
     }
 
     @Override
@@ -90,7 +96,7 @@ public final class SimulatedTagReader implements TagReader {
 
     @Override
     public String describe() {
-        return "simulator";
+        return "simulator:" + readerConfig.readerName();
     }
 
     private void emit() {
@@ -100,8 +106,8 @@ public final class SimulatedTagReader implements TagReader {
             return;
         }
 
-        int index = counter.getAndIncrement() % config.simulatedTagCount;
+        int index = counter.getAndIncrement() % readerConfig.simulatedTagCount();
 
-        target.onEpc(String.format("E2801170000000%02d", index + 1));
+        target.onEpc(String.format("E2801170%02d0000%02d", readerConfig.index() % 100, index + 1));
     }
 }

@@ -125,10 +125,13 @@ Keep one entry per key; if a key is repeated, the last entry wins.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `READER_HOST` | `192.168.1.100` | R400 IP |
-| `READER_PORT` | `9090` | R400 TCP port |
-| `READER_NAME` | `Device1` | Name passed to the SDK |
+| `READER_HOST` | `192.168.1.100` | R400 IP (or comma-separated IPs for multiple controllers) |
+| `READER_PORT` | `9090` | R400 TCP port (or comma-separated ports) |
+| `READER_NAME` | `Device1` | Name passed to the SDK (or comma-separated names) |
 | `READER_MODE` | `hardware` | `simulator` emits fake EPCs with no R400 |
+| `READER_ANTENNAS` | `1,2` | Active antenna ports (`1..4`); separate multiple readers with `;` |
+| `READER_ID` | empty | Middleware reader UUID (or comma-separated UUIDs) |
+| `READER_<N>_*` | falls back to `READER_*` | Per-controller overrides (`READER_1_*`, `READER_2_*`, ... for `HOST`, `PORT`, `NAME`, `MODE`, `ANTENNAS`, `ID`, `TAG_FILTERING_TIME_MS`) |
 | `READER_TAG_FILTERING_TIME_MS` | `0` | Reader side repeat filter, 0 keeps the vendor default |
 | `READER_WATCHDOG_INTERVAL_MS` | `5000` | How often a live session checks the reader link |
 | `AGENT_BIND_ADDRESS` | `0.0.0.0` | Control server bind address |
